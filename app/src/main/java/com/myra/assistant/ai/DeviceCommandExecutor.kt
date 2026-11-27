@@ -13,6 +13,9 @@ import android.telecom.TelecomManager
 import android.util.Log
 import com.myra.assistant.model.AppCommand
 import com.myra.assistant.service.AccessibilityHelperService
+import com.myra.assistant.service.MyraVoiceSession
+import com.myra.assistant.service.ScreenCaptureService
+import com.myra.assistant.ui.main.ScreenCapturePermissionActivity
 import org.json.JSONArray
 
 class DeviceCommandExecutor(private val context: Context) {
@@ -60,6 +63,8 @@ class DeviceCommandExecutor(private val context: Context) {
                 AppCommand.TYPE_FLASHLIGHT_OFF -> toggleFlashlight(false)
                 AppCommand.TYPE_WIFI_ON, AppCommand.TYPE_WIFI_OFF -> toggleWifi()
                 AppCommand.TYPE_BLUETOOTH_ON, AppCommand.TYPE_BLUETOOTH_OFF -> toggleBluetooth()
+                AppCommand.TYPE_SCREEN_SHARE_ON -> startScreenShare()
+                AppCommand.TYPE_SCREEN_SHARE_OFF -> stopScreenShare()
                 else -> null
             }
         } catch (e: Exception) {
@@ -267,6 +272,36 @@ class DeviceCommandExecutor(private val context: Context) {
         }
         context.startActivity(intent)
         return "Opened Bluetooth Settings"
+    }
+
+    private fun startScreenShare(): String {
+        if (MyraVoiceSession.isScreenSharing.value) {
+            return "Screen share is already active. I can see your screen now."
+        }
+        if (MyraVoiceSession.isMainUiActive) {
+            MyraVoiceSession.requestScreenShareToggle(true)
+        } else {
+            val intent = Intent(context, ScreenCapturePermissionActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            }
+            context.startActivity(intent)
+        }
+        return "Opening screen share permission. Please tap Allow so I can see your screen."
+    }
+
+    private fun stopScreenShare(): String {
+        if (!MyraVoiceSession.isScreenSharing.value) {
+            return "Screen share is already turned off."
+        }
+        val stopIntent = Intent(context, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_STOP_CAPTURE
+        }
+        try {
+            context.startService(stopIntent)
+        } catch (_: Exception) {
+            MyraVoiceSession.setScreenSharing(false)
+        }
+        return "Screen share stopped."
     }
 
     fun acceptCall(): String? {

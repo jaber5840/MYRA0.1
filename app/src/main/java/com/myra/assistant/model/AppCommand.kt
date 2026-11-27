@@ -21,5 +21,7 @@ data class AppCommand(
         const val TYPE_WIFI_OFF = "WIFI_OFF"
         const val TYPE_BLUETOOTH_ON = "BLUETOOTH_ON"
         const val TYPE_BLUETOOTH_OFF = "BLUETOOTH_OFF"
+        const val TYPE_SCREEN_SHARE_ON = "SCREEN_SHARE_ON"
+        const val TYPE_SCREEN_SHARE_OFF = "SCREEN_SHARE_OFF"
     }
 }

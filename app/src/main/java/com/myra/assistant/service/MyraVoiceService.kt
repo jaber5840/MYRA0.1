@@ -189,6 +189,11 @@ class MyraVoiceService : Service() {
         MyraVoiceSession.setStatusText("Connecting to Gemini AI... ✨")
 
         initEngines()
+        MyraVoiceSession.imageFrameSink = { base64Jpeg ->
+            if (isAiRunning && geminiLive?.isSessionReady == true) {
+                geminiLive?.sendImageFrame(base64Jpeg)
+            }
+        }
         audioEngine?.isMuted = false
         audioEngine?.startPlayback()
         audioEngine?.startRecording()
@@ -229,8 +234,12 @@ class MyraVoiceService : Service() {
         MyraVoiceSession.setOrbState(OrbAnimationView.State.IDLE)
         MyraVoiceSession.setStatusText("Tap START to talk ✨")
 
+        MyraVoiceSession.imageFrameSink = null
         try {
             stopService(Intent(this, MyraOverlayService::class.java))
+        } catch (_: Exception) {}
+        try {
+            stopService(Intent(this, ScreenCaptureService::class.java))
         } catch (_: Exception) {}
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
@@ -579,12 +588,16 @@ class MyraVoiceService : Service() {
         geminiLive?.disconnect()
         audioEngine?.release()
         serviceScope.cancel()
+        MyraVoiceSession.imageFrameSink = null
         MyraVoiceSession.setRunning(false)
         MyraVoiceSession.setMuted(true)
         MyraVoiceSession.setSpeaking(false)
         MyraVoiceSession.setOrbState(OrbAnimationView.State.IDLE)
         try {
             stopService(Intent(this, MyraOverlayService::class.java))
+        } catch (_: Exception) {}
+        try {
+            stopService(Intent(this, ScreenCaptureService::class.java))
         } catch (_: Exception) {}
     }
 

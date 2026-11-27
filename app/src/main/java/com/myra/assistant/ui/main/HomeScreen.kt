@@ -69,8 +69,10 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.ScreenShare
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.StopScreenShare
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -147,12 +149,14 @@ fun HomeScreen(
     isRunning: Boolean,
     isMuted: Boolean,
     isSpeaking: Boolean,
+    isScreenSharing: Boolean,
     orbState: OrbAnimationView.State,
     statusText: String,
     amplitude: Float,
     messages: List<ChatMessage>,
     telemetry: HomeTelemetryState,
     onStartStopClick: () -> Unit,
+    onScreenShareClick: () -> Unit,
     onMicClick: () -> Unit,
     onMicLongPress: () -> Unit,
     onOrbClick: () -> Unit,
@@ -212,6 +216,7 @@ fun HomeScreen(
             // 1. TOP HEADER BAR (MYRA AI ASSISTANT + Bell + Settings)
             DarkTopBrandHeader(
                 isRunning = isRunning,
+                isScreenSharing = isScreenSharing,
                 accentColor = accentColor,
                 onCheckUpdatesClick = onCheckUpdatesClick,
                 onSettingsClick = onSettingsClick
@@ -229,6 +234,7 @@ fun HomeScreen(
                             isRunning = isRunning,
                             isMuted = isMuted,
                             isSpeaking = isSpeaking,
+                            isScreenSharing = isScreenSharing,
                             orbState = orbState,
                             statusText = statusText,
                             amplitude = amplitude,
@@ -245,7 +251,8 @@ fun HomeScreen(
                             },
                             onOpenQuickActions = { showQuickActionsSheet = true },
                             onOrbClick = onOrbClick,
-                            onVoiceModeClick = onStartStopClick
+                            onVoiceModeClick = onStartStopClick,
+                            onScreenShareClick = onScreenShareClick
                         )
                     }
                     HomeTab.CHAT -> {
@@ -270,8 +277,10 @@ fun HomeScreen(
                         TriggersTabContent(
                             telemetry = telemetry,
                             isRunning = isRunning,
+                            isScreenSharing = isScreenSharing,
                             accentColor = accentColor,
                             onStartStopClick = onStartStopClick,
+                            onScreenShareClick = onScreenShareClick,
                             onOpenOverlaySettings = onOpenOverlaySettings,
                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                             onExecuteQuickCommand = onExecuteQuickCommand
@@ -320,6 +329,7 @@ fun HomeScreen(
 @Composable
 private fun DarkTopBrandHeader(
     isRunning: Boolean,
+    isScreenSharing: Boolean,
     accentColor: Color,
     onCheckUpdatesClick: () -> Unit,
     onSettingsClick: () -> Unit
@@ -358,13 +368,33 @@ private fun DarkTopBrandHeader(
                             .background(MyraColors.Emerald)
                     )
                 }
+                if (isScreenSharing) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MyraColors.Crimson.copy(alpha = 0.22f),
+                        border = BorderStroke(1.dp, MyraColors.Crimson.copy(alpha = 0.6f))
+                    ) {
+                        Text(
+                            text = "SCREEN LIVE",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 8.5.sp,
+                            color = Color(0xFFFFB3C1),
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                        )
+                    }
+                }
             }
             Text(
-                text = if (isRunning) "LIVE ASSISTANT" else "AI ASSISTANT",
+                text = when {
+                    isScreenSharing -> "SCREEN VISION ACTIVE"
+                    isRunning -> "LIVE ASSISTANT"
+                    else -> "AI ASSISTANT"
+                },
                 fontFamily = JetBrainsMonoFontFamily,
                 fontSize = 9.sp,
                 letterSpacing = 2.sp,
-                color = if (isRunning) accentColor else Color(0xFF7C7C92)
+                color = if (isRunning || isScreenSharing) accentColor else Color(0xFF7C7C92)
             )
         }
 
@@ -421,6 +451,7 @@ private fun HomeDashboardContent(
     isRunning: Boolean,
     isMuted: Boolean,
     isSpeaking: Boolean,
+    isScreenSharing: Boolean,
     orbState: OrbAnimationView.State,
     statusText: String,
     amplitude: Float,
@@ -431,7 +462,8 @@ private fun HomeDashboardContent(
     onSendMessage: () -> Unit,
     onOpenQuickActions: () -> Unit,
     onOrbClick: () -> Unit,
-    onVoiceModeClick: () -> Unit
+    onVoiceModeClick: () -> Unit,
+    onScreenShareClick: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -619,14 +651,14 @@ private fun HomeDashboardContent(
                 )
 
                 FeatureActionCard(
-                    icon = Icons.Rounded.Bolt,
-                    title = "Quick Actions",
-                    subtitle = "Apps, Calls & Tools",
-                    isHighlighted = false,
-                    onClick = onOpenQuickActions,
+                    icon = if (isScreenSharing) Icons.Rounded.StopScreenShare else Icons.Rounded.ScreenShare,
+                    title = if (isScreenSharing) "Screen Live" else "Screen Share",
+                    subtitle = if (isScreenSharing) "Seeing screen • Tap stop" else "Share mobile screen",
+                    isHighlighted = isScreenSharing,
+                    onClick = onScreenShareClick,
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("quick_actions_card")
+                        .testTag("screen_share_card")
                 )
             }
         }
@@ -1312,8 +1344,10 @@ private fun ChatBubbleItem(
 private fun TriggersTabContent(
     telemetry: HomeTelemetryState,
     isRunning: Boolean,
+    isScreenSharing: Boolean,
     accentColor: Color,
     onStartStopClick: () -> Unit,
+    onScreenShareClick: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onExecuteQuickCommand: (AppCommand) -> Unit
@@ -1334,7 +1368,7 @@ private fun TriggersTabContent(
                 color = Color.White
             )
             Text(
-                text = "Background voice, floating Siri orb, and quick device actions",
+                text = "Background voice, screen vision, floating Siri orb, and quick device actions",
                 fontFamily = PlusJakartaFontFamily,
                 fontSize = 12.5.sp,
                 color = Color(0xFF8C8CA4)
@@ -1350,6 +1384,18 @@ private fun TriggersTabContent(
                 isActive = isRunning,
                 accentColor = accentColor,
                 onClick = onStartStopClick
+            )
+        }
+
+        item {
+            TriggerStatusRowCard(
+                icon = if (isScreenSharing) Icons.Rounded.StopScreenShare else Icons.Rounded.ScreenShare,
+                title = "Live Screen Share",
+                subtitle = if (isScreenSharing) "MYRA can see your phone screen now" else "Say \"screen share on koro\" or tap to share",
+                statusLabel = if (isScreenSharing) "LIVE" else "SHARE",
+                isActive = isScreenSharing,
+                accentColor = accentColor,
+                onClick = onScreenShareClick
             )
         }
 

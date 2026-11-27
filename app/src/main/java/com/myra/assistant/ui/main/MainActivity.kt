@@ -8,6 +8,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
@@ -40,6 +41,7 @@ import com.myra.assistant.service.CallMonitorService
 import com.myra.assistant.service.MyraOverlayService
 import com.myra.assistant.service.MyraVoiceService
 import com.myra.assistant.service.MyraVoiceSession
+import com.myra.assistant.service.ScreenCaptureService
 import com.myra.assistant.ui.settings.SettingsActivity
 import com.myra.assistant.ui.theme.MyraTheme
 import com.myra.assistant.update.GitHubUpdateChecker
@@ -98,6 +100,40 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val screenCaptureLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            val captureIntent = Intent(this, ScreenCaptureService::class.java).apply {
+                action = ScreenCaptureService.ACTION_START_CAPTURE
+                putExtra(ScreenCaptureService.EXTRA_RESULT_CODE, result.resultCode)
+                putExtra(ScreenCaptureService.EXTRA_RESULT_DATA, result.data)
+            }
+            ContextCompat.startForegroundService(this, captureIntent)
+            Toast.makeText(this, "Screen Share ON — MYRA can see your screen", Toast.LENGTH_SHORT).show()
+
+            if (MyraVoiceSession.isRunning.value) {
+                sendServiceAction(MyraVoiceService.ACTION_SEND_TEXT) {
+                    putExtra(
+                        MyraVoiceService.EXTRA_TEXT,
+                        "Screen share is now ON. Confirm in 1 short sentence that you can see the user's screen now."
+                    )
+                    putExtra(MyraVoiceService.EXTRA_ADD_TO_CHAT, false)
+                }
+            } else if (requireApiKeyAndMic()) {
+                val voiceIntent = Intent(this, MyraVoiceService::class.java).apply {
+                    action = MyraVoiceService.ACTION_START
+                }
+                ContextCompat.startForegroundService(this, voiceIntent)
+            }
+
+            maybePromptOverlayPermission()
+        } else {
+            MyraVoiceSession.setScreenSharing(false)
+            Toast.makeText(this, "Screen share permission cancelled", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     override fun attachBaseContext(newBase: Context?) {
         if (newBase != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             super.attachBaseContext(newBase.createAttributionContext("default"))
@@ -124,12 +160,14 @@ class MainActivity : AppCompatActivity() {
                 val statusText by MyraVoiceSession.statusText.collectAsStateWithLifecycle()
                 val amplitude by MyraVoiceSession.amplitude.collectAsStateWithLifecycle()
                 val messages by MyraVoiceSession.messages.collectAsStateWithLifecycle()
+                val isScreenSharing by MyraVoiceSession.isScreenSharing.collectAsStateWithLifecycle()
                 val telemetry by telemetryState
 
                 HomeScreen(
                     isRunning = isRunning,
                     isMuted = isMuted,
                     isSpeaking = isSpeaking,
+                    isScreenSharing = isScreenSharing,
                     orbState = orbState,
                     statusText = statusText,
                     amplitude = amplitude,
@@ -141,6 +179,9 @@ class MainActivity : AppCompatActivity() {
                         } else {
                             startAiAssistant()
                         }
+                    },
+                    onScreenShareClick = {
+                        toggleScreenShare()
                     },
                     onMicClick = {
                         if (!MyraVoiceSession.isRunning.value) {
@@ -190,6 +231,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         observeSessionErrors()
+        observeScreenShareCommands()
         checkAndRequestPermissions(autoStart = false)
         startStatusUpdates()
 
@@ -223,6 +265,50 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    private fun observeScreenShareCommands() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                MyraVoiceSession.screenShareCommandEvents.collect { enable ->
+                    if (enable && !MyraVoiceSession.isScreenSharing.value) {
+                        requestStartScreenShare()
+                    } else if (!enable && MyraVoiceSession.isScreenSharing.value) {
+                        stopScreenShare()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun toggleScreenShare() {
+        if (MyraVoiceSession.isScreenSharing.value) {
+            stopScreenShare()
+        } else {
+            requestStartScreenShare()
+        }
+    }
+
+    private fun requestStartScreenShare() {
+        val projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+        if (projectionManager == null) {
+            Toast.makeText(this, "Screen capture is not supported on this device", Toast.LENGTH_SHORT).show()
+            return
+        }
+        navigatingToSettings = true
+        screenCaptureLauncher.launch(projectionManager.createScreenCaptureIntent())
+    }
+
+    private fun stopScreenShare() {
+        val stopIntent = Intent(this, ScreenCaptureService::class.java).apply {
+            action = ScreenCaptureService.ACTION_STOP_CAPTURE
+        }
+        try {
+            startService(stopIntent)
+        } catch (_: Exception) {
+            MyraVoiceSession.setScreenSharing(false)
+        }
+        Toast.makeText(this, "Screen Share OFF", Toast.LENGTH_SHORT).show()
     }
 
     private fun checkForAppUpdateOnLaunch() {
@@ -547,6 +633,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        MyraVoiceSession.isMainUiActive = true
         navigatingToSettings = false
         try {
             stopService(Intent(this, MyraOverlayService::class.java))
@@ -563,6 +650,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStop() {
         super.onStop()
+        MyraVoiceSession.isMainUiActive = false
         if (!isChangingConfigurations && !isFinishing && !navigatingToSettings &&
             MyraVoiceSession.isRunning.value &&
             (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this))

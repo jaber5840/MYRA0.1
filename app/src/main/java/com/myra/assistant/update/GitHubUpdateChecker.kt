@@ -37,6 +37,7 @@ object GitHubUpdateChecker {
     private val client = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(12, TimeUnit.SECONDS)
+        .followRedirects(true)
         .build()
 
     fun getConfiguredRepo(context: Context): String {
@@ -71,10 +72,10 @@ object GitHubUpdateChecker {
         onResult: (CheckResult) -> Unit
     ) {
         val repo = normalizeRepo(repoOverride ?: getConfiguredRepo(context))
-        val url = "https://api.github.com/repos/$repo/releases/latest"
+        val apiUrl = "https://api.github.com/repos/$repo/releases/latest"
 
         val request = Request.Builder()
-            .url(url)
+            .url(apiUrl)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "MYRA-Android/${BuildConfig.VERSION_NAME}")
             .get()
@@ -82,19 +83,30 @@ object GitHubUpdateChecker {
 
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                onResult(CheckResult.Error("Connection failed: ${e.message ?: "Network error"}"))
+                checkLatestViaWebRedirect(repo, onResult, fallbackError = "Connection failed: ${e.message ?: "Network error"}")
             }
 
             override fun onResponse(call: Call, response: Response) {
+                val code = response.code
                 val bodyStr = response.body?.string().orEmpty()
-                if (response.code == 404) {
-                    onResult(
-                        CheckResult.Error("No new update is currently available. Please check again later.")
-                    )
-                    return
-                }
-                if (!response.isSuccessful) {
-                    onResult(CheckResult.Error("Update server returned HTTP ${response.code}"))
+                response.close()
+
+                // GitHub REST API rate-limits unauthenticated shared IPs with 403/429;
+                // fall back to the public web release redirect which has no API rate limit.
+                if (code == 403 || code == 429 || !response.isSuccessful) {
+                    if (code == 404) {
+                        checkLatestViaWebRedirect(
+                            repo = repo,
+                            onResult = onResult,
+                            fallbackError = "No published update is available right now."
+                        )
+                    } else {
+                        checkLatestViaWebRedirect(
+                            repo = repo,
+                            onResult = onResult,
+                            fallbackError = "Unable to reach update server (HTTP $code)"
+                        )
+                    }
                     return
                 }
 
@@ -137,7 +149,74 @@ object GitHubUpdateChecker {
                         onResult(CheckResult.UpToDate(currentVersion, tagName.ifBlank { null }))
                     }
                 } catch (e: Exception) {
-                    onResult(CheckResult.Error("Failed to parse release info: ${e.message}"))
+                    checkLatestViaWebRedirect(repo, onResult, "Failed to parse update info: ${e.message}")
+                }
+            }
+        })
+    }
+
+    private fun checkLatestViaWebRedirect(
+        repo: String,
+        onResult: (CheckResult) -> Unit,
+        fallbackError: String
+    ) {
+        val webUrl = "https://github.com/$repo/releases/latest"
+        val request = Request.Builder()
+            .url(webUrl)
+            .header("User-Agent", "Mozilla/5.0 (Linux; Android 14) MYRA/${BuildConfig.VERSION_NAME}")
+            .get()
+            .build()
+
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                onResult(CheckResult.Error(fallbackError))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val finalUrl = response.request.url.toString()
+                val code = response.code
+                response.close()
+
+                if (!response.isSuccessful) {
+                    onResult(CheckResult.Error(fallbackError))
+                    return
+                }
+
+                val currentVersion = BuildConfig.VERSION_NAME
+                if (finalUrl.contains("/releases/tag/")) {
+                    val tagName = finalUrl
+                        .substringAfter("/releases/tag/")
+                        .substringBefore("?")
+                        .substringBefore("#")
+                        .trim()
+
+                    if (tagName.isNotEmpty()) {
+                        if (isNewerVersion(tagName, currentVersion)) {
+                            val normalizedVer = tagName.removePrefix("v").removePrefix("V")
+                            val apkUrl = "https://github.com/$repo/releases/download/$tagName/MYRA-v$normalizedVer.apk"
+                            onResult(
+                                CheckResult.UpdateAvailable(
+                                    ReleaseInfo(
+                                        tagName = tagName,
+                                        releaseName = "MYRA $tagName",
+                                        releaseNotes = "A new version of MYRA ($tagName) is ready with the latest improvements.",
+                                        htmlUrl = finalUrl,
+                                        apkDownloadUrl = apkUrl
+                                    )
+                                )
+                            )
+                        } else {
+                            onResult(CheckResult.UpToDate(currentVersion, tagName))
+                        }
+                        return
+                    }
+                }
+
+                // If repo has /releases page without a tag redirect yet, treat as up-to-date
+                if (code in 200..299) {
+                    onResult(CheckResult.UpToDate(currentVersion, null))
+                } else {
+                    onResult(CheckResult.Error(fallbackError))
                 }
             }
         })
@@ -176,7 +255,7 @@ object GitHubUpdateChecker {
             release.htmlUrl
         }
         if (!targetUrl.startsWith("https://github.com/")) {
-            Toast.makeText(context, "Invalid GitHub release URL", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Invalid release URL", Toast.LENGTH_SHORT).show()
             return
         }
         try {

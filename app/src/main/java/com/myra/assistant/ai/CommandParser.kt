@@ -9,6 +9,42 @@ object CommandParser {
         if (text.isNullOrBlank()) return null
         val lower = text.lowercase(Locale.ROOT).trim()
 
+        // Screen share / screen capture controls (checked before open/close app rules)
+        if (lower.contains("screen share off") ||
+            lower.contains("screen share band") ||
+            lower.contains("screen share bondo") ||
+            lower.contains("screen share stop") ||
+            lower.contains("stop screen share") ||
+            lower.contains("screen sharing off") ||
+            lower.contains("screen sharing stop") ||
+            lower.contains("screen sharing band") ||
+            lower.contains("screen capture off") ||
+            lower.contains("screen capture stop") ||
+            lower.contains("screen share close") ||
+            lower.contains("screen off koro")
+        ) {
+            return AppCommand(AppCommand.TYPE_SCREEN_SHARE_OFF)
+        }
+        if (lower.contains("screen share on") ||
+            lower.contains("screen share chalu") ||
+            lower.contains("screen share start") ||
+            lower.contains("start screen share") ||
+            lower.contains("share my screen") ||
+            lower.contains("share screen") ||
+            lower.contains("screen share kor") ||
+            lower.contains("screen sharing on") ||
+            lower.contains("screen sharing start") ||
+            lower.contains("screen capture on") ||
+            lower.contains("screen capture start") ||
+            lower.contains("screen capture") ||
+            lower.contains("amar screen dekho") ||
+            lower.contains("mobile screen dekho") ||
+            lower.contains("screen dekho") ||
+            lower.contains("see my screen")
+        ) {
+            return AppCommand(AppCommand.TYPE_SCREEN_SHARE_ON)
+        }
+
         // System controls
         if (lower.contains("volume up") || lower.contains("volume badhao") || lower.contains("volume aawaz badhao")) {
             return AppCommand(AppCommand.TYPE_VOLUME_UP)

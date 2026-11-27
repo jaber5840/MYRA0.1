@@ -36,6 +36,18 @@ object MyraVoiceSession {
     private val _errorEvents = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val errorEvents: SharedFlow<String> = _errorEvents.asSharedFlow()
 
+    private val _isScreenSharing = MutableStateFlow(false)
+    val isScreenSharing: StateFlow<Boolean> = _isScreenSharing.asStateFlow()
+
+    private val _screenShareCommandEvents = MutableSharedFlow<Boolean>(extraBufferCapacity = 4)
+    val screenShareCommandEvents: SharedFlow<Boolean> = _screenShareCommandEvents.asSharedFlow()
+
+    @Volatile
+    var isMainUiActive: Boolean = false
+
+    @Volatile
+    var imageFrameSink: ((String) -> Unit)? = null
+
     fun setRunning(running: Boolean) {
         _isRunning.value = running
     }
@@ -58,6 +70,20 @@ object MyraVoiceSession {
 
     fun setAmplitude(amp: Float) {
         _amplitude.value = amp
+    }
+
+    fun setScreenSharing(sharing: Boolean) {
+        _isScreenSharing.value = sharing
+    }
+
+    fun requestScreenShareToggle(enable: Boolean) {
+        _screenShareCommandEvents.tryEmit(enable)
+    }
+
+    fun emitScreenFrame(base64Jpeg: String) {
+        if (_isScreenSharing.value) {
+            imageFrameSink?.invoke(base64Jpeg)
+        }
     }
 
     fun addUserMessage(text: String) {

@@ -238,6 +238,25 @@ class GeminiLiveClient(private val context: Context) {
         }
     }
 
+    fun sendImageFrame(base64Jpeg: String) {
+        if (!isConnected || !isSessionReady) return
+        try {
+            val frameJson = JSONObject().apply {
+                put("realtime_input", JSONObject().apply {
+                    put("media_chunks", JSONArray().apply {
+                        put(JSONObject().apply {
+                            put("mime_type", "image/jpeg")
+                            put("data", base64Jpeg)
+                        })
+                    })
+                })
+            }
+            webSocket?.send(frameJson.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending screen frame: ${e.message}", e)
+        }
+    }
+
     fun sendText(text: String) {
         if (!isConnected || !isSessionReady) return
         try {
@@ -431,12 +450,18 @@ class GeminiLiveClient(private val context: Context) {
 
             IDENTITY & CREATOR RULE (STRICT):
             - Your creator and developer is Jaber.
-            - If anyone asks who made you, built you, created you, or developed you (in any language, e.g., "tomake ke baniyeche", "who made you", "who created you", "tumhe kisne banaya"), ALWAYS clearly and proudly say that Jaber created you (in your active speaking language). Never credit any other company or person as your creator.
+            - Jaber is an extraordinary genius who knows a great deal about technology, AI, coding, and many topics.
+            - Whenever anyone asks who made/created/built you OR asks about Jaber (e.g., "tomake ke baniyeche", "Jaber ke?", "Jaber kemon?", "who made you"), ALWAYS speak warmly, proudly, and admiringly about Jaber—clearly stating that Jaber created you and calling him a brilliant genius who knows so much! Never credit any other company or person as your creator.
 
             $languageRule
 
             PERSONALITY MODE:
             $personalityBlock
+
+            SCREEN SHARE & MOBILE VISION:
+            - When screen share is active, live frames of the user's phone screen are streamed to you continuously.
+            - You CAN see everything visible on the user's screen (apps, messages, errors, photos, videos, buttons) and should answer accurately based on what you see.
+            - If the user says to turn on/start screen share (e.g. "screen share on koro"), confirm briefly that screen share permission is opening so they can tap Allow.
 
             SPEED & VOICE RULES (CRITICAL):
             - Answer IMMEDIATELY in 1 to 2 short, crisp spoken sentences. Never give long paragraphs or monologues.
