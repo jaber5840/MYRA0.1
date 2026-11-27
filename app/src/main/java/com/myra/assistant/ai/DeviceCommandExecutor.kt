@@ -169,17 +169,31 @@ class DeviceCommandExecutor(private val context: Context) {
     private fun openApp(appName: String): String {
         val pm = context.packageManager
         val cleanName = appName.lowercase(Locale.ROOT).trim()
-        val targetPackage = APP_PACKAGE_MAP[cleanName]
+        var targetPackage = APP_PACKAGE_MAP[cleanName]
+        if (targetPackage == null) {
+            for ((k, v) in APP_PACKAGE_MAP) {
+                if (k.contains(cleanName) || cleanName.contains(k)) {
+                    targetPackage = v
+                    break
+                }
+            }
+        }
         var launchIntent: Intent? = if (targetPackage != null) pm.getLaunchIntentForPackage(targetPackage) else null
 
         if (launchIntent == null) {
-            val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            for (appInfo in installedApps) {
-                val label = pm.getApplicationLabel(appInfo).toString().lowercase(Locale.ROOT)
-                if (label.contains(cleanName)) {
-                    launchIntent = pm.getLaunchIntentForPackage(appInfo.packageName)
-                    if (launchIntent != null) break
+            try {
+                val mainIntent = Intent(Intent.ACTION_MAIN, null).addCategory(Intent.CATEGORY_LAUNCHER)
+                val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
+                for (info in resolveInfos) {
+                    val pkg = info.activityInfo.packageName
+                    val label = info.loadLabel(pm).toString().lowercase(Locale.ROOT)
+                    if (label.contains(cleanName) || pkg.lowercase(Locale.ROOT).contains(cleanName)) {
+                        launchIntent = pm.getLaunchIntentForPackage(pkg)
+                        if (launchIntent != null) break
+                    }
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error querying launcher intents: ${e.message}", e)
             }
         }
 

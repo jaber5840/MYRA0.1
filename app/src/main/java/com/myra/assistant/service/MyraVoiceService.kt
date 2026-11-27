@@ -82,6 +82,7 @@ class MyraVoiceService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        promoteToForeground("MYRA Active", "Listening in background")
         when (intent?.action) {
             ACTION_START -> startVoiceSession()
             ACTION_STOP -> stopVoiceSession()
