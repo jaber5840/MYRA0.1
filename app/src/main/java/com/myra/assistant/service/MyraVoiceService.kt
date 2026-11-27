@@ -346,8 +346,7 @@ class MyraVoiceService : Service() {
                 }
 
                 onInterrupted = {
-                    outputBuffer.clear()
-                    audioEngine?.clearPlaybackQueue(immediateMicResume = true)
+                    Log.d(TAG, "Server reported interrupted; ignoring automatic cut-off to prevent background chatter from halting MYRA.")
                 }
 
                 onOutputTranscript = { text ->
@@ -401,6 +400,7 @@ class MyraVoiceService : Service() {
                             MyraVoiceSession.setOrbState(OrbAnimationView.State.LISTENING)
                             MyraVoiceSession.setStatusText("Shunchi, bolun... 🎙️")
                         } else {
+                            audioEngine?.suppressMicBriefly(2500L)
                             MyraVoiceSession.setOrbState(OrbAnimationView.State.THINKING)
                             MyraVoiceSession.setStatusText("Thinking... ✨")
                         }

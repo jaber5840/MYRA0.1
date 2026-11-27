@@ -39,6 +39,23 @@ object CommandParser {
         if (text.isBlank()) return null
         val lower = text.lowercase(Locale.ROOT).trim()
 
+        // Filter out conversational questions about capabilities so they are answered by Gemini AI instead of executing as device commands
+        val isCapabilityQuestion = lower.startsWith("tumi ki") ||
+            lower.contains("korte paro") ||
+            lower.contains("korte parba") ||
+            lower.contains("paro ki") ||
+            lower.startsWith("can you") ||
+            lower.startsWith("could you") ||
+            lower.startsWith("are you able") ||
+            lower.startsWith("how to") ||
+            lower.contains("ki bhabe") ||
+            lower.contains("kemon kore") ||
+            lower.contains("janen ki") ||
+            lower.contains("jano ki")
+        if (isCapabilityQuestion) {
+            return null
+        }
+
         // 1. Confirmation / Cancellation (used when a Call / WhatsApp / SMS confirmation is pending)
         if (lower in setOf("yes", "confirm", "send it", "send", "ok confirm", "haan", "ha", "pathao", "call koro", "do it", "proceed")) {
             return AppCommand(AppCommand.TYPE_CONFIRM_ACTION)
@@ -181,7 +198,7 @@ object CommandParser {
         if (lower.contains("what time") || lower.contains("current time") || lower.contains("koto baje") || lower.contains("today's date") || lower.contains("today date") || lower.contains("koto tarikh") || lower == "time" || lower == "date") {
             return AppCommand(AppCommand.TYPE_TIME_DATE)
         }
-        if (lower.contains("set alarm") || lower.contains("wake me up") || lower.contains("alarm dao")) {
+        if (lower.contains("set alarm") || lower.contains("set an alarm") || lower.contains("wake me up") || lower.contains("alarm dao") || (lower.contains("alarm") && (lower.contains("for") || lower.contains("at") || lower.contains("am") || lower.contains("pm")))) {
             val (hour, minute) = extractTimeForAlarm(lower)
             return AppCommand(
                 AppCommand.TYPE_SET_ALARM,
@@ -246,9 +263,9 @@ object CommandParser {
         }
 
         // 10. Open app
-        if (lower.contains("kholo") || lower.startsWith("open ") || lower.contains(" open ") || lower.contains("chalu karo") || lower.contains("launch ")) {
+        if (lower.startsWith("open ") || lower.contains(" open ") || lower.contains(" kholo") || lower.contains("kholo ") || lower.contains("chalu karo") || lower.contains("launch ")) {
             val appName = extractAppNameForOpen(lower)
-            if (appName.isNotEmpty()) {
+            if (appName.isNotEmpty() && !appName.contains("tumi") && !appName.contains("paro") && !appName.contains("korte") && !appName.contains("ki")) {
                 return AppCommand(AppCommand.TYPE_OPEN_APP, mapOf("app_name" to appName))
             }
         }
@@ -341,13 +358,22 @@ object CommandParser {
     }
 
     private fun extractAppNameForOpen(lower: String): String {
-        return lower
+        val cleaned = lower
             .replace("kholo", "")
             .replace("open", "")
             .replace("launch", "")
             .replace("chalu karo", "")
             .replace("app", "")
+            .replace("apps", "")
+            .replace("tumi", "")
+            .replace("ki", "")
+            .replace("korte", "")
+            .replace("paro", "")
             .trim()
+        for (key in listOf("whatsapp", "youtube", "instagram", "facebook", "chrome", "gmail", "maps", "spotify", "settings", "calculator", "calendar", "contacts", "telegram", "snapchat", "twitter", "x", "zoom")) {
+            if (cleaned.contains(key)) return key
+        }
+        return if (cleaned.split("\\s+".toRegex()).size <= 2) cleaned else ""
     }
 
     private fun extractAppNameForClose(lower: String): String {

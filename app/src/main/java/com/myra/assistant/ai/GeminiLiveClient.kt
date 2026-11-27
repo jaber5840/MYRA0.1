@@ -221,10 +221,10 @@ class GeminiLiveClient(private val context: Context) {
                     })
                     put("realtime_input_config", JSONObject().apply {
                         put("automatic_activity_detection", JSONObject().apply {
-                            put("start_of_speech_sensitivity", "START_SENSITIVITY_HIGH")
-                            put("end_of_speech_sensitivity", "END_SENSITIVITY_HIGH")
-                            put("silence_duration_ms", 320)
-                            put("prefix_padding_ms", 240)
+                            put("start_of_speech_sensitivity", "START_SENSITIVITY_LOW")
+                            put("end_of_speech_sensitivity", "END_SENSITIVITY_LOW")
+                            put("silence_duration_ms", 1000)
+                            put("prefix_padding_ms", 300)
                         })
                     })
                     put("output_audio_transcription", JSONObject())

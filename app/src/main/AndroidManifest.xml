@@ -57,8 +57,22 @@
             <action android:name="android.speech.RecognitionService" />
         </intent>
         <package android:name="com.whatsapp" />
+        <package android:name="com.facebook.katana" />
+        <package android:name="com.facebook.orca" />
+        <package android:name="com.instagram.android" />
         <package android:name="com.google.android.youtube" />
         <package android:name="com.android.chrome" />
+        <package android:name="com.google.android.gm" />
+        <package android:name="com.google.android.apps.maps" />
+        <package android:name="com.spotify.music" />
+        <package android:name="org.telegram.messenger" />
+        <package android:name="com.snapchat.android" />
+        <package android:name="com.twitter.android" />
+        <package android:name="com.android.settings" />
+        <package android:name="com.google.android.calculator" />
+        <package android:name="com.google.android.calendar" />
+        <package android:name="com.google.android.contacts" />
+        <package android:name="com.android.vending" />
     </queries>
 
     <application

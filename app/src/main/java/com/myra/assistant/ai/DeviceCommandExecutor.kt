@@ -53,6 +53,7 @@ class DeviceCommandExecutor(private val context: Context) {
             "clock" to "com.google.android.deskclock",
             "contacts" to "com.google.android.contacts",
             "play store" to "com.android.vending",
+            "messenger" to "com.facebook.orca",
             "zoom" to "us.zoom.videomeetings"
         )
     }
@@ -169,11 +170,13 @@ class DeviceCommandExecutor(private val context: Context) {
     private fun openApp(appName: String): String {
         val pm = context.packageManager
         val cleanName = appName.lowercase(Locale.ROOT).trim()
+        Log.i(TAG, "Attempting to open app: '$appName' (cleaned: '$cleanName')")
         var targetPackage = APP_PACKAGE_MAP[cleanName]
         if (targetPackage == null) {
             for ((k, v) in APP_PACKAGE_MAP) {
                 if (k.contains(cleanName) || cleanName.contains(k)) {
                     targetPackage = v
+                    Log.i(TAG, "Matched app '$cleanName' to package '$v' via key '$k'")
                     break
                 }
             }
@@ -189,19 +192,29 @@ class DeviceCommandExecutor(private val context: Context) {
                     val label = info.loadLabel(pm).toString().lowercase(Locale.ROOT)
                     if (label.contains(cleanName) || pkg.lowercase(Locale.ROOT).contains(cleanName)) {
                         launchIntent = pm.getLaunchIntentForPackage(pkg)
-                        if (launchIntent != null) break
+                        if (launchIntent != null) {
+                            Log.i(TAG, "Discovered app package '$pkg' matching label '$label'")
+                            break
+                        }
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error querying launcher intents: ${e.message}", e)
+                Log.e(TAG, "Error querying launcher intents for $appName: ${e.message}", e)
             }
         }
 
         return if (launchIntent != null) {
-            launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            context.startActivity(launchIntent)
-            "Opening $appName."
+            try {
+                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+                context.startActivity(launchIntent)
+                Log.i(TAG, "Successfully executed intent for app: $appName")
+                "Successfully opened $appName."
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start activity for $appName: ${e.message}", e)
+                "Failed to open $appName: ${e.message}"
+            }
         } else {
+            Log.w(TAG, "App not found on device: $appName")
             "Could not find $appName installed on this device."
         }
     }
