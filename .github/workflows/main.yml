@@ -35,7 +35,7 @@ jobs:
             TAG_VER="${GITHUB_REF_NAME#v}"
             echo "app_version=$TAG_VER" >> "$GITHUB_OUTPUT"
           else
-            echo "app_version=1.0.0" >> "$GITHUB_OUTPUT"
+            echo "app_version=0.1" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Build APK
