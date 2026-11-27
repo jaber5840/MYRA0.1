@@ -355,6 +355,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startSystemServices() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            Log.i(TAG, "Skipping CallMonitorService start: READ_PHONE_STATE permission not granted")
+            return
+        }
         try {
             val callMonitorIntent = Intent(this, CallMonitorService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

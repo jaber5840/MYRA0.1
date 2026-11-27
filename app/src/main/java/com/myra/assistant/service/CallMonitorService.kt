@@ -1,11 +1,13 @@
 package com.myra.assistant.service
 
+import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
@@ -15,6 +17,7 @@ import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.myra.assistant.R
 import com.myra.assistant.ui.main.MainActivity
 
@@ -33,6 +36,7 @@ class CallMonitorService : Service() {
     private lateinit var telephonyManager: TelephonyManager
     private var phoneStateListener: PhoneStateListener? = null
     private var telephonyCallback: TelephonyCallback? = null
+    private var isListenerRegistered = false
 
     override fun attachBaseContext(newBase: Context?) {
         if (newBase != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -57,31 +61,68 @@ class CallMonitorService : Service() {
         }
 
         telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+        if (!hasPhoneStatePermission()) {
+            Log.i(TAG, "READ_PHONE_STATE permission not granted yet; stopping CallMonitorService.")
+            stopSelf()
+            return
+        }
         registerCallListener()
     }
 
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!hasPhoneStatePermission()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
+        if (!isListenerRegistered) {
+            registerCallListener()
+        }
+        return START_STICKY
+    }
+
+    private fun hasPhoneStatePermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.READ_PHONE_STATE
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
     private fun registerCallListener() {
+        if (isListenerRegistered || !hasPhoneStatePermission()) return
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            telephonyCallback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+            val callback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
                 override fun onCallStateChanged(state: Int) {
                     handleCallState(state, null)
                 }
             }
             try {
-                telephonyManager.registerTelephonyCallback(mainExecutor, telephonyCallback!!)
+                telephonyManager.registerTelephonyCallback(mainExecutor, callback)
+                telephonyCallback = callback
+                isListenerRegistered = true
+            } catch (se: SecurityException) {
+                Log.w(TAG, "Phone state permission missing for TelephonyCallback: ${se.message}")
             } catch (e: Exception) {
                 Log.e(TAG, "Error registering TelephonyCallback: ${e.message}", e)
             }
         } else {
             @Suppress("DEPRECATION")
-            phoneStateListener = object : PhoneStateListener() {
+            val listener = object : PhoneStateListener() {
                 @Deprecated("Deprecated in Java")
                 override fun onCallStateChanged(state: Int, incomingNumber: String?) {
                     handleCallState(state, incomingNumber)
                 }
             }
-            @Suppress("DEPRECATION")
-            telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+            try {
+                @Suppress("DEPRECATION")
+                telephonyManager.listen(listener, PhoneStateListener.LISTEN_CALL_STATE)
+                phoneStateListener = listener
+                isListenerRegistered = true
+            } catch (se: SecurityException) {
+                Log.w(TAG, "Phone state permission missing for PhoneStateListener: ${se.message}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error registering PhoneStateListener: ${e.message}", e)
+            }
         }
     }
 
@@ -110,6 +151,9 @@ class CallMonitorService : Service() {
 
     private fun resolveCallerName(incomingNumber: String?): String {
         if (incomingNumber.isNullOrEmpty()) return "Unknown Caller"
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) != PackageManager.PERMISSION_GRANTED) {
+            return incomingNumber
+        }
         try {
             val uri = Uri.withAppendedPath(
                 ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
@@ -144,6 +188,8 @@ class CallMonitorService : Service() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error unregistering listener: ${e.message}", e)
+        } finally {
+            isListenerRegistered = false
         }
     }
 
