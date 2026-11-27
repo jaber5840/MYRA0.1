@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">MYRA</string>
+    <string name="accessibility_description">MYRA Assistant Accessibility Helper to perform voice commands like opening/closing apps.</string>
+</resources>
