@@ -21,6 +21,8 @@ import com.myra.assistant.R
 import com.myra.assistant.databinding.ActivitySettingsBinding
 import com.myra.assistant.service.AccessibilityHelperService
 import com.myra.assistant.update.GitHubUpdateChecker
+import com.myra.assistant.update.RemoteConfigUpdateManager
+import com.myra.assistant.update.UpdateDialogHelper
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -87,41 +89,29 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun checkForUpdatesManually() {
-        val repo = GitHubUpdateChecker.saveConfiguredRepo(this, binding.githubRepoInput.text.toString())
-        binding.githubRepoInput.setText(repo)
+        val repo = GitHubUpdateChecker.getConfiguredRepo(this)
         binding.checkUpdateBtn.isEnabled = false
-        binding.checkUpdateBtn.text = "CHECKING GITHUB..."
+        binding.checkUpdateBtn.text = "CHECKING FOR UPDATES..."
+        binding.remoteConfigStatusText.text = "Update Service: Checking..."
 
-        GitHubUpdateChecker.checkLatestRelease(this, repo) { result ->
+        RemoteConfigUpdateManager.checkForUpdates(this, forceRefresh = true, repoOverride = repo) { outcome ->
             runOnUiThread {
                 binding.checkUpdateBtn.isEnabled = true
                 binding.checkUpdateBtn.text = "CHECK FOR UPDATES"
+                val syncLabel = if (outcome.remoteConfigSynced) "Active" else "Ready"
+                binding.remoteConfigStatusText.text =
+                    "Update Service: $syncLabel (Latest v${outcome.remoteLatestVersion.removePrefix("v").removePrefix("V")})"
 
-                when (result) {
+                when (val result = outcome.checkResult) {
                     is GitHubUpdateChecker.CheckResult.UpdateAvailable -> {
-                        val release = result.release
-                        AlertDialog.Builder(this@SettingsActivity)
-                            .setTitle("Update Available: ${release.tagName} 🚀")
-                            .setMessage(
-                                "Installed: v${BuildConfig.VERSION_NAME}\n" +
-                                    "Latest: ${release.tagName}\n\n" +
-                                    release.releaseNotes.take(450)
-                            )
-                            .setPositiveButton(if (release.apkDownloadUrl != null) "DOWNLOAD APK" else "OPEN RELEASE") { _, _ ->
-                                GitHubUpdateChecker.openReleaseInBrowser(
-                                    this@SettingsActivity,
-                                    release,
-                                    preferApkLink = release.apkDownloadUrl != null
-                                )
-                            }
-                            .setNeutralButton("RELEASE PAGE") { _, _ ->
-                                GitHubUpdateChecker.openReleaseInBrowser(this@SettingsActivity, release, preferApkLink = false)
-                            }
-                            .setNegativeButton("LATER", null)
-                            .show()
+                        UpdateDialogHelper.showUpdateDialog(
+                            activity = this@SettingsActivity,
+                            release = result.release,
+                            isMandatory = outcome.isMandatory
+                        )
                     }
                     is GitHubUpdateChecker.CheckResult.UpToDate -> {
-                        val latestNote = if (result.latestTag != null) " (Latest: ${result.latestTag})" else ""
+                        val latestNote = if (result.latestTag != null) " (${result.latestTag})" else ""
                         AlertDialog.Builder(this@SettingsActivity)
                             .setTitle("Up to Date ✅")
                             .setMessage("MYRA v${result.currentVersion} is already the latest version$latestNote.")
@@ -496,6 +486,7 @@ class SettingsActivity : AppCompatActivity() {
 
         binding.appVersionText.text = "v${BuildConfig.VERSION_NAME}"
         binding.githubRepoInput.setText(GitHubUpdateChecker.getConfiguredRepo(this))
+        binding.remoteConfigStatusText.text = RemoteConfigUpdateManager.getCurrentRemoteSummary()
 
         primeContacts.clear()
         val jsonStr = prefs.getString("prime_contacts_json", null)

@@ -89,14 +89,12 @@ object GitHubUpdateChecker {
                 val bodyStr = response.body?.string().orEmpty()
                 if (response.code == 404) {
                     onResult(
-                        CheckResult.Error(
-                            "No public release found for \"$repo\".\n\nMake sure:\n1. The GitHub repository is Public (or has a published Release).\n2. You created a GitHub Release with a version tag like v1.0.1."
-                        )
+                        CheckResult.Error("No new update is currently available. Please check again later.")
                     )
                     return
                 }
                 if (!response.isSuccessful) {
-                    onResult(CheckResult.Error("GitHub API returned HTTP ${response.code}"))
+                    onResult(CheckResult.Error("Update server returned HTTP ${response.code}"))
                     return
                 }
 
@@ -105,7 +103,7 @@ object GitHubUpdateChecker {
                     val tagName = json.optString("tag_name", "").trim()
                     val releaseName = json.optString("name", tagName).ifBlank { tagName }
                     val releaseNotes = json.optString("body", "").ifBlank {
-                        "A new version of MYRA is ready on GitHub."
+                        "A new version of MYRA is ready."
                     }
                     val htmlUrl = json.optString("html_url", "https://github.com/$repo/releases")
 

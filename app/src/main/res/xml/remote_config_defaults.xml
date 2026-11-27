@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<defaultsMap>
+    <entry>
+        <key>update_check_enabled</key>
+        <value>true</value>
+    </entry>
+    <entry>
+        <key>latest_app_version</key>
+        <value>0.2</value>
+    </entry>
+    <entry>
+        <key>min_supported_version</key>
+        <value>0.1</value>
+    </entry>
+    <entry>
+        <key>update_github_repo</key>
+        <value>jaber5840/MYRA0.1</value>
+    </entry>
+    <entry>
+        <key>update_release_url</key>
+        <value>https://github.com/jaber5840/MYRA0.1/releases/latest</value>
+    </entry>
+    <entry>
+        <key>update_release_notes</key>
+        <value>A new version of MYRA is available on GitHub.</value>
+    </entry>
+    <entry>
+        <key>force_update_required</key>
+        <value>false</value>
+    </entry>
+</defaultsMap>

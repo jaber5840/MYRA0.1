@@ -24,7 +24,7 @@ class GeminiLiveClient(private val context: Context) {
     companion object {
         private const val TAG = "GeminiLiveClient"
         private const val DEFAULT_LIVE_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
-        private const val BASE_WS_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
+        private const val BASE_WS_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent"
         private const val SESSION_RENEW_AFTER_MS = 540_000L // 9 minutes
         private const val RECONNECT_DELAY_MS = 2_000L
     }
@@ -118,6 +118,7 @@ class GeminiLiveClient(private val context: Context) {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (webSocket !== this@GeminiLiveClient.webSocket) return
                 Log.i(TAG, "WebSocket Opened with model: $model")
                 isConnecting = false
                 isConnected = true
@@ -130,27 +131,43 @@ class GeminiLiveClient(private val context: Context) {
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (webSocket !== this@GeminiLiveClient.webSocket) return
                 parseServerMessage(text)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (webSocket !== this@GeminiLiveClient.webSocket) return
                 parseServerMessage(bytes.utf8())
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket Failure: ${t.message}", t)
-                handleDisconnect("Connection error: ${t.message}")
+                if (webSocket !== this@GeminiLiveClient.webSocket) return
+                val code = response?.code
+                Log.e(TAG, "WebSocket Failure ($code): ${t.message}", t)
+                if (code == 400 || code == 401 || code == 403) {
+                    shouldAutoReconnect = false
+                    handleDisconnect("Invalid or rejected Gemini API key (HTTP $code)")
+                } else {
+                    handleDisconnect("Connection error: ${t.message ?: "Network failure"}")
+                }
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                if (webSocket !== this@GeminiLiveClient.webSocket) return
                 Log.i(TAG, "WebSocket Closing: $code / $reason")
                 webSocket.close(1000, null)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (webSocket !== this@GeminiLiveClient.webSocket) return
                 Log.i(TAG, "WebSocket Closed: $code / $reason")
-                val msg = if (reason.isNotBlank()) "Disconnected: $reason" else "Disconnected"
-                handleDisconnect(msg)
+                val errMsg = when {
+                    !shouldAutoReconnect -> null
+                    code == 1000 && reason.isBlank() -> null
+                    reason.isNotBlank() -> "Disconnected ($code): $reason"
+                    else -> "Connection closed ($code)"
+                }
+                handleDisconnect(errMsg)
             }
         })
     }
@@ -330,15 +347,18 @@ class GeminiLiveClient(private val context: Context) {
         }
     }
 
-    private fun handleDisconnect(reason: String) {
+    private fun handleDisconnect(errorMessage: String?) {
         isConnected = false
         isConnecting = false
         isSessionReady = false
+        webSocket = null
         handler.removeCallbacks(sessionRenewalRunnable)
 
         handler.post {
             onDisconnected?.invoke()
-            onError?.invoke(reason)
+            if (!errorMessage.isNullOrBlank()) {
+                onError?.invoke(errorMessage)
+            }
         }
 
         if (shouldAutoReconnect) {
@@ -360,9 +380,10 @@ class GeminiLiveClient(private val context: Context) {
         isSessionReady = false
         handler.removeCallbacks(sessionRenewalRunnable)
         handler.removeCallbacks(autoReconnectRunnable)
+        val ws = webSocket
+        webSocket = null
         try {
-            webSocket?.close(1000, "Client closed")
-            webSocket = null
+            ws?.close(1000, "Client closed")
         } catch (e: Exception) {
             Log.e(TAG, "Error closing WebSocket: ${e.message}", e)
         }

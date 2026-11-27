@@ -16,8 +16,6 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -35,17 +33,12 @@ import com.myra.assistant.databinding.ActivityMainBinding
 import com.myra.assistant.service.CallMonitorService
 import com.myra.assistant.ui.settings.SettingsActivity
 import com.myra.assistant.update.GitHubUpdateChecker
+import com.myra.assistant.update.RemoteConfigUpdateManager
+import com.myra.assistant.update.UpdateDialogHelper
 import com.myra.assistant.viewmodel.MainViewModel
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -59,9 +52,6 @@ class MainActivity : AppCompatActivity() {
     private var geminiLive: GeminiLiveClient? = null
     private var audioEngine: AudioEngine? = null
     private var speechRecognizer: SpeechRecognizer? = null
-    private var textToSpeech: TextToSpeech? = null
-    private var isTtsReady = false
-    private var pendingTtsText: String? = null
 
     private val chatAdapter = ChatAdapter()
 
@@ -72,15 +62,10 @@ class MainActivity : AppCompatActivity() {
     private var isMuted = true
     private var isInCallMode = false
     private var pendingStartAfterPermission = false
-    private var hasReceivedLiveAudioInTurn = false
-    private var hasTriggeredGreetingFallback = false
+    private var hasGreetedThisSession = false
     private var lastConfigSignature: String? = null
 
     private val handler = Handler(Looper.getMainLooper())
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .build()
 
     private val statusUpdateRunnable = object : Runnable {
         override fun run() {
@@ -126,7 +111,6 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        initTts()
         setupUI()
         checkAndRequestPermissions(autoStart = false)
         startStatusUpdates()
@@ -152,106 +136,23 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
         val lastCheck = prefs.getLong("last_update_check_ms", 0L)
-        // Short 1-minute cooldown so fresh app launches detect new GitHub releases immediately
+        // Short 1-minute cooldown so fresh app launches detect Remote Config / GitHub updates promptly
         if (now - lastCheck < 60 * 1000L) return
         prefs.edit().putLong("last_update_check_ms", now).apply()
 
-        GitHubUpdateChecker.checkLatestRelease(this) { result ->
+        RemoteConfigUpdateManager.checkForUpdates(this, forceRefresh = false) { outcome ->
+            val result = outcome.checkResult
             if (result is GitHubUpdateChecker.CheckResult.UpdateAvailable) {
                 val release = result.release
                 val skippedTag = prefs.getString("skipped_update_tag", "")
-                if (release.tagName == skippedTag) return@checkLatestRelease
+                if (!outcome.isMandatory && release.tagName == skippedTag) return@checkForUpdates
 
                 runOnUiThread {
-                    if (isFinishing || isDestroyed) return@runOnUiThread
-                    AlertDialog.Builder(this@MainActivity)
-                        .setTitle("MYRA Update Available (${release.tagName}) 🚀")
-                        .setMessage(
-                            "Installed: v${BuildConfig.VERSION_NAME}\n" +
-                                "New Version: ${release.tagName}\n\n" +
-                                release.releaseNotes.take(350)
-                        )
-                        .setPositiveButton(if (release.apkDownloadUrl != null) "UPDATE NOW" else "OPEN RELEASE") { _, _ ->
-                            GitHubUpdateChecker.openReleaseInBrowser(
-                                this@MainActivity,
-                                release,
-                                preferApkLink = release.apkDownloadUrl != null
-                            )
-                        }
-                        .setNeutralButton("SKIP") { _, _ ->
-                            prefs.edit().putString("skipped_update_tag", release.tagName).apply()
-                        }
-                        .setNegativeButton("LATER", null)
-                        .show()
-                }
-            }
-        }
-    }
-
-    private fun updateTtsLanguage() {
-        val tts = textToSpeech ?: return
-        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
-        val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
-        val candidates = when (language) {
-            "Bangla" -> listOf(Locale("bn", "BD"), Locale("bn", "IN"), Locale("en", "IN"), Locale.US)
-            "English" -> listOf(Locale.US, Locale.ENGLISH, Locale.getDefault())
-            "Hindi" -> listOf(Locale("hi", "IN"), Locale("en", "IN"), Locale.US)
-            else -> listOf(Locale("bn", "BD"), Locale("en", "IN"), Locale.US, Locale.ENGLISH)
-        }
-        for (loc in candidates) {
-            val res = tts.isLanguageAvailable(loc)
-            if (res >= TextToSpeech.LANG_AVAILABLE) {
-                tts.language = loc
-                break
-            }
-        }
-    }
-
-    private fun initTts() {
-        textToSpeech = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                updateTtsLanguage()
-                textToSpeech?.setAudioAttributes(
-                    android.media.AudioAttributes.Builder()
-                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                isTtsReady = true
-                textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) {
-                        audioEngine?.setExternalSpeaking(true)
-                        runOnUiThread {
-                            binding.orbView.setState(OrbAnimationView.State.SPEAKING)
-                            binding.statusText.text = "Bol rahi hoon... 🔊"
-                            binding.waveformView.setAmplitude(0.75f)
-                            animateRedOverlay(true)
-                        }
-                    }
-
-                    override fun onDone(utteranceId: String?) {
-                        audioEngine?.setExternalSpeaking(false)
-                        runOnUiThread {
-                            if (isAiRunning) {
-                                binding.orbView.setState(OrbAnimationView.State.LISTENING)
-                                binding.statusText.text = if (isMuted) "Microphone Muted 🔇" else "Sun rahi hoon... 🎙️"
-                            } else {
-                                binding.orbView.setState(OrbAnimationView.State.IDLE)
-                                binding.statusText.text = "Tap START to talk ✨"
-                            }
-                            binding.waveformView.setAmplitude(0.1f)
-                            animateRedOverlay(false)
-                        }
-                    }
-
-                    @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) {
-                        onDone(utteranceId)
-                    }
-                })
-                pendingTtsText?.let { pending ->
-                    pendingTtsText = null
-                    speakWithTts(pending)
+                    UpdateDialogHelper.showUpdateDialog(
+                        activity = this@MainActivity,
+                        release = release,
+                        isMandatory = outcome.isMandatory
+                    )
                 }
             }
         }
@@ -383,14 +284,34 @@ class MainActivity : AppCompatActivity() {
         ).joinToString("|")
     }
 
-    private val greetingFallbackRunnable = Runnable {
-        if (isAiRunning && !hasReceivedLiveAudioInTurn) {
-            Log.i(TAG, "Live audio did not arrive in time; triggering active REST + voice fallback greeting")
-            speakActiveGeminiGreeting()
+    private fun getEffectiveApiKey(): String {
+        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+        var apiKey = prefs.getString("api_key", "")?.trim() ?: ""
+        if (apiKey.isEmpty()) {
+            apiKey = BuildConfig.GEMINI_API_KEY
         }
+        return if (apiKey == "MY_GEMINI_API_KEY") "" else apiKey
     }
 
     private fun startAiAssistant() {
+        val apiKey = getEffectiveApiKey()
+        if (apiKey.isEmpty()) {
+            isAiRunning = false
+            isMuted = true
+            updateControlButtons()
+            binding.orbView.setState(OrbAnimationView.State.IDLE)
+            binding.statusText.text = "Gemini API Key missing — add in Settings 🔑"
+            AlertDialog.Builder(this)
+                .setTitle("Gemini API Key Required 🔑")
+                .setMessage("Please add your Gemini API Key in Settings before starting MYRA.")
+                .setPositiveButton("OPEN SETTINGS") { _, _ ->
+                    startActivity(Intent(this, SettingsActivity::class.java))
+                }
+                .setNegativeButton("CANCEL", null)
+                .show()
+            return
+        }
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             checkAndRequestPermissions(autoStart = true)
             return
@@ -398,33 +319,29 @@ class MainActivity : AppCompatActivity() {
 
         isAiRunning = true
         isMuted = false
-        hasReceivedLiveAudioInTurn = false
-        hasTriggeredGreetingFallback = false
+        hasGreetedThisSession = false
         updateControlButtons()
 
         binding.orbView.setState(OrbAnimationView.State.THINKING)
-        binding.statusText.text = "Starting MYRA... ✨"
+        binding.statusText.text = "Connecting to Gemini AI... ✨"
 
         initGeminiLive()
         audioEngine?.isMuted = false
         audioEngine?.startPlayback()
         audioEngine?.startRecording()
 
-        if (geminiLive?.isConnected == true) {
+        if (geminiLive?.isConnected == true && geminiLive?.isSessionReady == true) {
+            hasGreetedThisSession = true
             sendGreeting()
         } else {
             geminiLive?.connect()
         }
-
-        handler.removeCallbacks(greetingFallbackRunnable)
-        handler.postDelayed(greetingFallbackRunnable, 3000L)
     }
 
     private fun stopAiAssistant() {
         isAiRunning = false
         isMuted = true
-        handler.removeCallbacks(greetingFallbackRunnable)
-        textToSpeech?.stop()
+        hasGreetedThisSession = false
         audioEngine?.setExternalSpeaking(false)
         geminiLive?.disconnect()
         audioEngine?.isMuted = true
@@ -457,8 +374,11 @@ class MainActivity : AppCompatActivity() {
                     Log.i(TAG, "Gemini Live Setup Complete")
                     if (isAiRunning) {
                         binding.orbView.setState(OrbAnimationView.State.LISTENING)
-                        binding.statusText.text = "MYRA active — bol rahi hoon... 🔊"
-                        sendGreeting()
+                        binding.statusText.text = "MYRA active — listening... 🎙️"
+                        if (!hasGreetedThisSession) {
+                            hasGreetedThisSession = true
+                            sendGreeting()
+                        }
                     }
                 }
 
@@ -473,20 +393,23 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 onError = { err ->
-                    Log.e(TAG, "Gemini Error: $err")
                     if (isAiRunning) {
-                        binding.statusText.text = err
-                        if (!hasReceivedLiveAudioInTurn) {
-                            handler.removeCallbacks(greetingFallbackRunnable)
-                            speakActiveGeminiGreeting()
+                        Log.e(TAG, "Gemini Error: $err")
+                        val lowerErr = err.lowercase()
+                        if (lowerErr.contains("api key") || lowerErr.contains("unauthorized") || lowerErr.contains("permission")) {
+                            stopAiAssistant()
+                            binding.statusText.text = err
+                            Toast.makeText(this@MainActivity, err, Toast.LENGTH_LONG).show()
+                        } else {
+                            binding.statusText.text = err
                         }
                     }
                 }
 
                 onAudioReceived = { pcmBytes ->
-                    hasReceivedLiveAudioInTurn = true
-                    handler.removeCallbacks(greetingFallbackRunnable)
-                    audioEngine?.queueAudio(pcmBytes)
+                    if (isAiRunning) {
+                        audioEngine?.queueAudio(pcmBytes)
+                    }
                 }
 
                 onOutputTranscript = { text ->
@@ -512,12 +435,8 @@ class MainActivity : AppCompatActivity() {
 
                     if (myraText.isNotEmpty()) {
                         addMyraMessage(myraText)
-                        if (!hasReceivedLiveAudioInTurn) {
-                            speakWithTts(myraText)
-                        }
                     }
 
-                    hasReceivedLiveAudioInTurn = false
                     inputBuffer.clear()
                     outputBuffer.clear()
                 }
@@ -591,171 +510,6 @@ class MainActivity : AppCompatActivity() {
         geminiLive?.sendText(prompt)
     }
 
-    private fun speakActiveGeminiGreeting() {
-        if (hasTriggeredGreetingFallback || hasReceivedLiveAudioInTurn || !isAiRunning) return
-        hasTriggeredGreetingFallback = true
-        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
-        var apiKey = prefs.getString("api_key", "")?.trim() ?: ""
-        if (apiKey.isEmpty()) apiKey = BuildConfig.GEMINI_API_KEY
-        val name = prefs.getString("user_name", "Alex") ?: "Alex"
-        val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
-
-        val fallbackLocalGreeting = when (language) {
-            "Bangla" -> "হ্যালো $name! আমি মাইরা বলছি, বলো তোমাকে কীভাবে সাহায্য করতে পারি?"
-            "English" -> "Hello $name! I am MYRA, how can I help you today?"
-            "Hindi" -> "Hello $name! Main MYRA hoon, bataiye main aapki kya help kar sakti hoon?"
-            else -> "Hey $name! Ami MYRA bolchi, bolo ki help lagbe tomar?"
-        }
-
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
-            addMyraMessage(fallbackLocalGreeting)
-            speakWithTts(fallbackLocalGreeting)
-            return
-        }
-
-        val prompt = when (language) {
-            "Bangla" -> "You are MYRA. Greet $name warmly in Bengali (বাংলা) in 1 short spoken sentence."
-            "English" -> "You are MYRA. Greet $name warmly in English in 1 short spoken sentence."
-            "Hindi" -> "You are MYRA. Greet $name warmly in Hindi/Hinglish in 1 short spoken sentence."
-            else -> "You are MYRA. Greet $name warmly in Banglish (Bengali + English) in 1 short spoken sentence."
-        }
-
-        // Use cached active models immediately if available for instant response
-        val cachedJson = prefs.getString("cached_active_chat_models", null)
-        if (!cachedJson.isNullOrEmpty()) {
-            try {
-                val arr = JSONArray(cachedJson)
-                val cachedList = mutableListOf<String>()
-                for (i in 0 until arr.length()) {
-                    val m = arr.optString(i)
-                    if (m.isNotEmpty()) cachedList.add(m)
-                }
-                if (cachedList.isNotEmpty()) {
-                    tryFallbackGenerate(apiKey, prompt, cachedList, 0, fallbackLocalGreeting)
-                    return
-                }
-            } catch (_: Exception) {}
-        }
-
-        // Otherwise discover active generateContent model and fetch a live greeting
-        val listReq = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
-            .get()
-            .build()
-
-        httpClient.newCall(listReq).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                runOnUiThread {
-                    if (isAiRunning && !hasReceivedLiveAudioInTurn) {
-                        addMyraMessage(fallbackLocalGreeting)
-                        speakWithTts(fallbackLocalGreeting)
-                    }
-                }
-            }
-
-            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                val listJson = response.body?.string() ?: ""
-                val activeModels = mutableListOf<String>()
-                try {
-                    val arr = JSONObject(listJson).optJSONArray("models")
-                    if (arr != null) {
-                        for (i in 0 until arr.length()) {
-                            val obj = arr.optJSONObject(i) ?: continue
-                            val id = obj.optString("name", "").removePrefix("models/")
-                            val methods = obj.optJSONArray("supportedGenerationMethods") ?: continue
-                            var supportsGen = false
-                            for (m in 0 until methods.length()) {
-                                if (methods.optString(m) == "generateContent") supportsGen = true
-                            }
-                            if (supportsGen && id.startsWith("gemini-") && id.contains("flash") &&
-                                !id.contains("tts") && !id.contains("image") && !id.contains("exp")
-                            ) {
-                                activeModels.add(id)
-                            }
-                        }
-                    }
-                } catch (_: Exception) {}
-
-                val modelsToTry = if (activeModels.isNotEmpty()) {
-                    prefs.edit().putString("cached_active_chat_models", JSONArray(activeModels.take(6)).toString()).apply()
-                    activeModels.take(4)
-                } else {
-                    listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash")
-                }
-
-                tryFallbackGenerate(apiKey, prompt, modelsToTry, 0, fallbackLocalGreeting)
-            }
-        })
-    }
-
-    private fun tryFallbackGenerate(
-        apiKey: String,
-        prompt: String,
-        models: List<String>,
-        index: Int,
-        fallbackLocalGreeting: String
-    ) {
-        if (!isAiRunning || hasReceivedLiveAudioInTurn) return
-        if (index >= models.size) {
-            runOnUiThread {
-                addMyraMessage(fallbackLocalGreeting)
-                speakWithTts(fallbackLocalGreeting)
-            }
-            return
-        }
-
-        val modelId = models[index]
-        val jsonBody = JSONObject().apply {
-            put("contents", JSONArray().put(
-                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))
-            ))
-        }
-        val req = Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent?key=$apiKey")
-            .post(jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
-            .build()
-
-        httpClient.newCall(req).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                tryFallbackGenerate(apiKey, prompt, models, index + 1, fallbackLocalGreeting)
-            }
-
-            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                val str = response.body?.string() ?: ""
-                if (response.isSuccessful) {
-                    try {
-                        val reply = JSONObject(str)
-                            .getJSONArray("candidates")
-                            .getJSONObject(0)
-                            .getJSONObject("content")
-                            .getJSONArray("parts")
-                            .getJSONObject(0)
-                            .getString("text")
-                            .trim()
-                        runOnUiThread {
-                            if (isAiRunning && !hasReceivedLiveAudioInTurn) {
-                                addMyraMessage(reply)
-                                speakWithTts(reply)
-                            }
-                        }
-                        return
-                    } catch (_: Exception) {}
-                }
-                tryFallbackGenerate(apiKey, prompt, models, index + 1, fallbackLocalGreeting)
-            }
-        })
-    }
-
-    private fun speakWithTts(text: String) {
-        if (!isTtsReady) {
-            pendingTtsText = text
-            return
-        }
-        val params = Bundle()
-        params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, android.media.AudioManager.STREAM_MUSIC)
-        textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "myra_utterance_${System.currentTimeMillis()}")
-    }
-
     private fun handleIncomingCallIntent(intent: Intent?) {
         if (intent?.action == CallMonitorService.ACTION_INCOMING_CALL) {
             val callerName = intent.getStringExtra(CallMonitorService.EXTRA_CALLER_NAME) ?: "Someone"
@@ -823,7 +577,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun interruptMyra() {
-        textToSpeech?.stop()
         audioEngine?.clearPlaybackQueue()
         geminiLive?.sendInterrupt()
         if (isAiRunning) {
@@ -881,7 +634,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        updateTtsLanguage()
         if (isAiRunning && !isMuted) {
             audioEngine?.isMuted = false
         }
@@ -891,6 +643,7 @@ class MainActivity : AppCompatActivity() {
         if (isAiRunning && geminiLive != null && lastConfigSignature != null && currentSig != lastConfigSignature) {
             lastConfigSignature = currentSig
             binding.statusText.text = "Reconnecting with updated settings..."
+            hasGreetedThisSession = false
             geminiLive?.reconnect()
         }
     }
@@ -898,13 +651,10 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(statusUpdateRunnable)
-        handler.removeCallbacks(greetingFallbackRunnable)
         try {
             unregisterReceiver(callEndedReceiver)
         } catch (_: Exception) {}
 
-        textToSpeech?.stop()
-        textToSpeech?.shutdown()
         speechRecognizer?.destroy()
         geminiLive?.disconnect()
         audioEngine?.release()
