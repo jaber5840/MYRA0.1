@@ -123,14 +123,14 @@ class MyraVoiceService : Service() {
     private fun handleUserOrSystemText(text: String, addToChat: Boolean) {
         if (addToChat) {
             MyraVoiceSession.addUserMessage(text)
-            val cmd = CommandParser.parse(text)
-            if (cmd != null) {
+            val cmds = CommandParser.parseAll(text)
+            if (cmds.isNotEmpty()) {
                 serviceScope.launch {
-                    val result = commandExecutor.executeCommand(cmd)
+                    val result = commandExecutor.executeCommands(cmds, rawInput = text)
                     if (!result.isNullOrEmpty()) {
                         MyraVoiceSession.addMyraMessage(result)
                         if (geminiLive?.isSessionReady == true) {
-                            geminiLive?.sendText(result)
+                            geminiLive?.sendText("Task feedback for user: $result")
                         }
                     }
                 }
@@ -364,13 +364,13 @@ class MyraVoiceService : Service() {
 
                     if (userText.isNotEmpty()) {
                         MyraVoiceSession.addUserMessage(userText)
-                        val cmd = CommandParser.parse(userText)
-                        if (cmd != null) {
+                        val cmds = CommandParser.parseAll(userText)
+                        if (cmds.isNotEmpty()) {
                             serviceScope.launch {
-                                val result = commandExecutor.executeCommand(cmd)
+                                val result = commandExecutor.executeCommands(cmds, rawInput = userText)
                                 if (!result.isNullOrEmpty()) {
                                     MyraVoiceSession.addMyraMessage(result)
-                                    geminiLive?.sendText(result)
+                                    geminiLive?.sendText("Task feedback for user: $result")
                                 }
                             }
                         }
@@ -465,7 +465,9 @@ class MyraVoiceService : Service() {
             prefs.getString("gemini_voice", "") ?: "",
             prefs.getString("personality_mode", "") ?: "",
             prefs.getString("language_mode", "Banglish") ?: "Banglish",
-            prefs.getString("user_name", "") ?: ""
+            prefs.getString("user_name", "") ?: "",
+            prefs.getString("voice_response_style", "Concise") ?: "Concise",
+            prefs.getBoolean("memory_consent_enabled", false).toString()
         ).joinToString("|")
     }
 

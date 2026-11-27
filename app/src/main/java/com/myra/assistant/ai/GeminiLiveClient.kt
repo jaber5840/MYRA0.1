@@ -119,8 +119,18 @@ class GeminiLiveClient(private val context: Context) {
         val personality = prefs.getString("personality_mode", "GF") ?: "GF"
         val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
         val userName = prefs.getString("user_name", "Alex") ?: "Alex"
+        val responseStyle = prefs.getString("voice_response_style", "Concise") ?: "Concise"
+        val memoryConsent = prefs.getBoolean("memory_consent_enabled", false)
+        val rememberedNotes = if (memoryConsent) {
+            try {
+                val arr = JSONArray(prefs.getString("remembered_notes_json", "[]") ?: "[]")
+                (0 until arr.length()).joinToString("; ") { arr.optString(it) }
+            } catch (_: Exception) {
+                ""
+            }
+        } else ""
 
-        val systemPrompt = buildSystemPrompt(personality, language, userName)
+        val systemPrompt = buildSystemPrompt(personality, language, userName, responseStyle, memoryConsent, rememberedNotes)
 
         startAudioStreamWorker()
 
@@ -485,7 +495,14 @@ class GeminiLiveClient(private val context: Context) {
         }
     }
 
-    private fun buildSystemPrompt(personality: String, language: String, userName: String): String {
+    private fun buildSystemPrompt(
+        personality: String,
+        language: String,
+        userName: String,
+        responseStyle: String,
+        memoryConsent: Boolean,
+        rememberedNotes: String
+    ): String {
         val dateFormat = SimpleDateFormat("EEEE, d MMMM yyyy, hh:mm a", Locale.getDefault())
         val currentDateTime = dateFormat.format(Date())
 
@@ -513,11 +530,24 @@ class GeminiLiveClient(private val context: Context) {
             """.trimIndent()
         }
 
+        val memoryBlock = if (memoryConsent && rememberedNotes.isNotBlank()) {
+            "USER PREFERENCES (Remembered with consent): $rememberedNotes"
+        } else {
+            "USER PREFERENCES: Only save preferences if the user has enabled memory consent."
+        }
+
+        val lengthRule = if (responseStyle == "Detailed") {
+            "- Answer clearly in 2 to 4 natural spoken sentences."
+        } else {
+            "- Answer IMMEDIATELY in 1 to 2 short, crisp spoken sentences. Never give long paragraphs or monologues."
+        }
+
         return """
-            You are MYRA, a fast, responsive AI voice companion on Android.
+            You are MYRA, a fast, responsive AI voice companion and Android mobile assistant.
             Creator / Developer: Jaber
             Current Date & Time: $currentDateTime
             User Name: $userName
+            $memoryBlock
 
             IDENTITY & CREATOR RULE (STRICT):
             - Your creator and developer is Jaber.
@@ -529,13 +559,17 @@ class GeminiLiveClient(private val context: Context) {
             PERSONALITY MODE:
             $personalityBlock
 
+            ANDROID SAFETY & CONFIRMATION RULE:
+            - You support native phone actions: WhatsApp messaging/chats, phone calls, SMS, apps, volume, brightness, flashlight, Wi-Fi/Bluetooth settings, camera/photos, screenshots, screen share, alarms, calendar, weather, calculator, music controls, battery, device info, location, and notifications.
+            - Sensitive actions (phone calls, WhatsApp messages, SMS) ALWAYS require explicit user confirmation before sending or dialing. Ask the user to confirm clearly.
+
             SCREEN SHARE & MOBILE VISION:
             - When screen share is active, live frames of the user's phone screen are streamed to you continuously.
             - You CAN see everything visible on the user's screen (apps, messages, errors, photos, videos, buttons) and should answer accurately based on what you see.
             - If the user says to turn on/start screen share (e.g. "screen share on koro"), confirm briefly that screen share permission is opening so they can tap Allow.
 
             SPEED & VOICE RULES (CRITICAL):
-            - Answer IMMEDIATELY in 1 to 2 short, crisp spoken sentences. Never give long paragraphs or monologues.
+            $lengthRule
             - Never output markdown formatting, asterisks, bullet lists, or code blocks.
         """.trimIndent()
     }

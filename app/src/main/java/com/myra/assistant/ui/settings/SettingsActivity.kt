@@ -1,7 +1,9 @@
 package com.myra.assistant.ui.settings
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -10,13 +12,18 @@ import android.widget.Toast
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import com.myra.assistant.BuildConfig
 import com.myra.assistant.service.AccessibilityHelperService
+import com.myra.assistant.service.MyraNotificationListenerService
+import com.myra.assistant.service.MyraVoiceSession
+import com.myra.assistant.ui.theme.MyraTheme
 import com.myra.assistant.update.GitHubUpdateChecker
 import com.myra.assistant.update.RemoteConfigUpdateManager
 import com.myra.assistant.update.UpdateDialogHelper
@@ -37,7 +44,20 @@ class SettingsActivity : AppCompatActivity() {
         "Gemini 2.5 Flash Live" to "models/gemini-2.5-flash-live-preview"
     )
 
+    companion object {
+        const val EXTRA_INITIAL_CATEGORY = "extra_initial_category"
+    }
+
     private var uiState by mutableStateOf(SettingsUiState(modelOptions = defaultLiveModels))
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        refreshPermissionFlags()
+        if (!granted) {
+            Toast.makeText(this, "Permission denied. You can enable it in App Settings.", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
@@ -49,78 +69,168 @@ class SettingsActivity : AppCompatActivity() {
         loadSavedSettings()
         refreshActiveLiveModelsSilently()
 
+        val initialCategory = intent.getStringExtra(EXTRA_INITIAL_CATEGORY)?.let { name ->
+            SettingsCategory.entries.firstOrNull { it.name == name }
+        }
+
         setContent {
-            MyraSettingsScreen(
-                state = uiState,
-                onApiKeyChange = { newKey ->
-                    uiState = uiState.copy(apiKey = newKey)
-                },
-                onUserNameChange = { newName ->
-                    uiState = uiState.copy(userName = newName)
-                },
-                onModelSelected = { modelId ->
-                    uiState = uiState.copy(selectedModel = modelId)
-                    persistCurrentSettings(showToast = false)
-                },
-                onVoiceSelected = { voiceId ->
-                    uiState = uiState.copy(selectedVoice = voiceId)
-                    persistCurrentSettings(showToast = false)
-                },
-                onPersonalitySelected = { mode ->
-                    uiState = uiState.copy(personalityMode = mode)
-                    persistCurrentSettings(showToast = false)
-                },
-                onLanguageSelected = { lang ->
-                    uiState = uiState.copy(languageMode = lang)
-                    persistCurrentSettings(showToast = false)
-                },
-                onAddPrimeContact = { name, number ->
-                    uiState = uiState.copy(
-                        primeContacts = uiState.primeContacts + PrimeContactItem(name, number)
-                    )
-                    persistCurrentSettings(showToast = false)
-                },
-                onDeletePrimeContact = { index ->
-                    if (index in uiState.primeContacts.indices) {
-                        val updated = uiState.primeContacts.toMutableList().apply { removeAt(index) }
-                        uiState = uiState.copy(primeContacts = updated)
+            MyraTheme(themeMode = uiState.themeMode) {
+                MyraSettingsScreen(
+                    state = uiState,
+                    initialCategory = initialCategory,
+                    onApiKeyChange = { newKey ->
+                        uiState = uiState.copy(apiKey = newKey)
+                    },
+                    onUserNameChange = { newName ->
+                        uiState = uiState.copy(userName = newName)
+                    },
+                    onModelSelected = { modelId ->
+                        uiState = uiState.copy(selectedModel = modelId)
                         persistCurrentSettings(showToast = false)
+                    },
+                    onVoiceSelected = { voiceId ->
+                        uiState = uiState.copy(selectedVoice = voiceId)
+                        persistCurrentSettings(showToast = false)
+                    },
+                    onResponseStyleSelected = { style ->
+                        uiState = uiState.copy(voiceResponseStyle = style)
+                        persistCurrentSettings(showToast = false)
+                    },
+                    onWakeWordToggle = { enabled ->
+                        uiState = uiState.copy(wakeWordEnabled = enabled)
+                        persistCurrentSettings(showToast = false)
+                    },
+                    onPersonalitySelected = { mode ->
+                        uiState = uiState.copy(personalityMode = mode)
+                        persistCurrentSettings(showToast = false)
+                    },
+                    onLanguageSelected = { lang ->
+                        uiState = uiState.copy(languageMode = lang)
+                        persistCurrentSettings(showToast = false)
+                    },
+                    onThemeModeSelected = { mode ->
+                        uiState = uiState.copy(themeMode = mode)
+                        MyraVoiceSession.setThemeMode(this@SettingsActivity, mode)
+                    },
+                    onMemoryConsentToggle = { enabled ->
+                        uiState = uiState.copy(memoryConsentEnabled = enabled)
+                        if (!enabled) {
+                            getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+                                .edit()
+                                .remove("remembered_notes_json")
+                                .apply()
+                        }
+                        persistCurrentSettings(showToast = false)
+                    },
+                    onClearMemoryClick = {
+                        getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+                            .edit()
+                            .remove("remembered_notes_json")
+                            .apply()
+                        Toast.makeText(this@SettingsActivity, "Remembered preferences cleared", Toast.LENGTH_SHORT).show()
+                    },
+                    onAddPrimeContact = { name, number ->
+                        uiState = uiState.copy(
+                            primeContacts = uiState.primeContacts + PrimeContactItem(name, number)
+                        )
+                        persistCurrentSettings(showToast = false)
+                    },
+                    onDeletePrimeContact = { index ->
+                        if (index in uiState.primeContacts.indices) {
+                            val updated = uiState.primeContacts.toMutableList().apply { removeAt(index) }
+                            uiState = uiState.copy(primeContacts = updated)
+                            persistCurrentSettings(showToast = false)
+                        }
+                    },
+                    onTestApiClick = {
+                        persistCurrentSettings(showToast = false)
+                        testGeminiApiKey()
+                    },
+                    onRequestRuntimePermission = { permission ->
+                        if (ContextCompat.checkSelfPermission(this@SettingsActivity, permission) == PackageManager.PERMISSION_GRANTED) {
+                            startActivity(
+                                Intent(
+                                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                    Uri.parse("package:$packageName")
+                                )
+                            )
+                        } else {
+                            permissionLauncher.launch(permission)
+                        }
+                    },
+                    onOpenWriteSettingsClick = {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    },
+                    onOpenAccessibilityClick = {
+                        showDisclosureAndOpen(
+                            title = "Accessibility Service Disclosure",
+                            message = "MYRA uses Accessibility Service ONLY when you activate it, to help navigate apps (Home/Back) and trigger system screenshots by voice. MYRA never collects screen text without your command.",
+                            targetIntent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        )
+                    },
+                    onOpenOverlayClick = {
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    },
+                    onOpenNotificationAccessClick = {
+                        showDisclosureAndOpen(
+                            title = "Notification Access Disclosure",
+                            message = "Grant Notification Reader access ONLY if you want MYRA to read your recent notifications aloud when you ask. Data stays local on your device.",
+                            targetIntent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                        )
+                    },
+                    onCheckUpdatesClick = {
+                        checkForUpdatesManually()
+                    },
+                    onSaveClick = {
+                        persistCurrentSettings(showToast = true)
+                        finish()
+                    },
+                    onCloseClick = {
+                        persistCurrentSettings(showToast = false)
+                        finish()
                     }
-                },
-                onTestApiClick = {
-                    persistCurrentSettings(showToast = false)
-                    testGeminiApiKey()
-                },
-                onOpenAccessibilityClick = {
-                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
-                },
-                onOpenOverlayClick = {
-                    val overlayIntent = Intent(
-                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                        Uri.parse("package:$packageName")
-                    )
-                    startActivity(overlayIntent)
-                },
-                onCheckUpdatesClick = {
-                    checkForUpdatesManually()
-                },
-                onSaveClick = {
-                    persistCurrentSettings(showToast = true)
-                    finish()
-                },
-                onCloseClick = {
-                    persistCurrentSettings(showToast = false)
-                    finish()
-                }
-            )
+                )
+            }
         }
     }
 
     override fun onResume() {
         super.onResume()
+        refreshPermissionFlags()
+    }
+
+    private fun showDisclosureAndOpen(title: String, message: String, targetIntent: Intent) {
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setMessage(message)
+            .setPositiveButton("OPEN SETTINGS") { _, _ ->
+                startActivity(targetIntent)
+            }
+            .setNegativeButton("CANCEL", null)
+            .show()
+    }
+
+    private fun refreshPermissionFlags() {
         uiState = uiState.copy(
+            isMicGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED,
+            isCameraGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED,
+            isContactsGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED,
+            isCallPhoneGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED,
+            isLocationGranted = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED,
+            isWriteSettingsGranted = Settings.System.canWrite(this),
             isAccessibilityEnabled = AccessibilityHelperService.isEnabled(this),
-            isOverlayEnabled = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
+            isOverlayEnabled = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this),
+            isNotificationAccessEnabled = MyraNotificationListenerService.isPermissionGranted(this)
         )
     }
 
@@ -165,14 +275,17 @@ class SettingsActivity : AppCompatActivity() {
             selectedModel = prefs.getString("gemini_model", defaultLiveModels.first().second)
                 ?: defaultLiveModels.first().second,
             selectedVoice = prefs.getString("gemini_voice", "Aoede") ?: "Aoede",
+            voiceResponseStyle = prefs.getString("voice_response_style", "Concise") ?: "Concise",
+            wakeWordEnabled = prefs.getBoolean("wake_word_enabled", false),
             personalityMode = prefs.getString("personality_mode", "GF") ?: "GF",
             languageMode = prefs.getString("language_mode", "Banglish") ?: "Banglish",
+            themeMode = prefs.getString("theme_mode", "DARK") ?: "DARK",
+            memoryConsentEnabled = prefs.getBoolean("memory_consent_enabled", false),
             primeContacts = savedContacts,
-            isAccessibilityEnabled = AccessibilityHelperService.isEnabled(this),
-            isOverlayEnabled = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this),
             appVersion = BuildConfig.VERSION_NAME,
             updateServiceStatus = RemoteConfigUpdateManager.getCurrentRemoteSummary()
         )
+        refreshPermissionFlags()
     }
 
     private fun persistCurrentSettings(showToast: Boolean) {
@@ -190,10 +303,16 @@ class SettingsActivity : AppCompatActivity() {
             .putString("user_name", uiState.userName.trim().ifEmpty { "Alex" })
             .putString("gemini_model", uiState.selectedModel)
             .putString("gemini_voice", uiState.selectedVoice)
+            .putString("voice_response_style", uiState.voiceResponseStyle)
+            .putBoolean("wake_word_enabled", uiState.wakeWordEnabled)
             .putString("personality_mode", uiState.personalityMode)
             .putString("language_mode", uiState.languageMode)
+            .putString("theme_mode", uiState.themeMode)
+            .putBoolean("memory_consent_enabled", uiState.memoryConsentEnabled)
             .putString("prime_contacts_json", array.toString())
             .apply()
+
+        MyraVoiceSession.setThemeMode(this, uiState.themeMode)
 
         if (showToast) {
             Toast.makeText(this, "Settings Saved!", Toast.LENGTH_SHORT).show()

@@ -59,6 +59,7 @@ import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.ChatBubbleOutline
@@ -69,15 +70,17 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MicOff
 import androidx.compose.material.icons.rounded.NotificationsNone
 import androidx.compose.material.icons.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.PhotoCamera
 import androidx.compose.material.icons.rounded.ScreenShare
+import androidx.compose.material.icons.rounded.Screenshot
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.StopScreenShare
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material.icons.rounded.WbSunny
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -120,7 +123,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.myra.assistant.model.AppCommand
+import com.myra.assistant.model.CommandHistoryItem
+import com.myra.assistant.model.PendingConfirmation
 import com.myra.assistant.ui.theme.JetBrainsMonoFontFamily
+import com.myra.assistant.ui.theme.LocalMyraPalette
 import com.myra.assistant.ui.theme.MyraColors
 import com.myra.assistant.ui.theme.PlusJakartaFontFamily
 import com.myra.assistant.ui.theme.SpaceGroteskFontFamily
@@ -150,10 +156,14 @@ fun HomeScreen(
     isMuted: Boolean,
     isSpeaking: Boolean,
     isScreenSharing: Boolean,
+    isWakeWordActive: Boolean,
+    isFlashlightOn: Boolean,
     orbState: OrbAnimationView.State,
     statusText: String,
     amplitude: Float,
     messages: List<ChatMessage>,
+    commandHistory: List<CommandHistoryItem>,
+    pendingConfirmation: PendingConfirmation?,
     telemetry: HomeTelemetryState,
     onStartStopClick: () -> Unit,
     onScreenShareClick: () -> Unit,
@@ -162,11 +172,16 @@ fun HomeScreen(
     onOrbClick: () -> Unit,
     onSendMessage: (String) -> Unit,
     onExecuteQuickCommand: (AppCommand) -> Unit,
+    onConfirmPending: () -> Unit,
+    onCancelPending: () -> Unit,
+    onClearHistory: () -> Unit,
     onCheckUpdatesClick: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenPermissionsSettings: () -> Unit,
     onSettingsClick: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     var activeTab by rememberSaveable { mutableStateOf(HomeTab.HOME) }
     var messageDraft by rememberSaveable { mutableStateOf("") }
     var showQuickActionsSheet by remember { mutableStateOf(false) }
@@ -190,16 +205,16 @@ fun HomeScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color(0xFF06060B))
+            .background(palette.background)
     ) {
-        // Subtle dark ambient vignette across entire screen
+        // Subtle ambient gradient across entire screen
         Canvas(modifier = Modifier.fillMaxSize()) {
             drawRect(
                 brush = Brush.verticalGradient(
                     colors = listOf(
-                        Color(0xFF0B0A11),
-                        Color(0xFF06060A),
-                        Color(0xFF08070D)
+                        palette.backgroundTop,
+                        palette.background,
+                        palette.backgroundBottom
                     )
                 )
             )
@@ -217,6 +232,7 @@ fun HomeScreen(
             DarkTopBrandHeader(
                 isRunning = isRunning,
                 isScreenSharing = isScreenSharing,
+                isWakeWordActive = isWakeWordActive,
                 accentColor = accentColor,
                 onCheckUpdatesClick = onCheckUpdatesClick,
                 onSettingsClick = onSettingsClick
@@ -235,6 +251,7 @@ fun HomeScreen(
                             isMuted = isMuted,
                             isSpeaking = isSpeaking,
                             isScreenSharing = isScreenSharing,
+                            isWakeWordActive = isWakeWordActive,
                             orbState = orbState,
                             statusText = statusText,
                             amplitude = amplitude,
@@ -274,16 +291,20 @@ fun HomeScreen(
                         )
                     }
                     HomeTab.TRIGGERS -> {
-                        TriggersTabContent(
+                        MobileControlDashboardContent(
                             telemetry = telemetry,
                             isRunning = isRunning,
                             isScreenSharing = isScreenSharing,
+                            isFlashlightOn = isFlashlightOn,
                             accentColor = accentColor,
+                            commandHistory = commandHistory,
                             onStartStopClick = onStartStopClick,
                             onScreenShareClick = onScreenShareClick,
                             onOpenOverlaySettings = onOpenOverlaySettings,
                             onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                            onExecuteQuickCommand = onExecuteQuickCommand
+                            onOpenPermissionsSettings = onOpenPermissionsSettings,
+                            onExecuteQuickCommand = onExecuteQuickCommand,
+                            onClearHistory = onClearHistory
                         )
                     }
                 }
@@ -304,13 +325,21 @@ fun HomeScreen(
         }
     }
 
+    if (pendingConfirmation != null) {
+        ActionConfirmationDialog(
+            pending = pendingConfirmation,
+            onConfirm = onConfirmPending,
+            onCancel = onCancelPending
+        )
+    }
+
     if (showQuickActionsSheet) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         ModalBottomSheet(
             onDismissRequest = { showQuickActionsSheet = false },
             sheetState = sheetState,
-            containerColor = Color(0xFF101018),
-            contentColor = MyraColors.TextPrimary
+            containerColor = palette.surfaceCard,
+            contentColor = palette.textPrimary
         ) {
             QuickActionsSheetContent(
                 onSelectPrompt = { prompt ->
@@ -330,10 +359,12 @@ fun HomeScreen(
 private fun DarkTopBrandHeader(
     isRunning: Boolean,
     isScreenSharing: Boolean,
+    isWakeWordActive: Boolean,
     accentColor: Color,
     onCheckUpdatesClick: () -> Unit,
     onSettingsClick: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -349,7 +380,7 @@ private fun DarkTopBrandHeader(
             ) {
                 Text(
                     text = buildAnnotatedString {
-                        withStyle(SpanStyle(color = Color.White, fontWeight = FontWeight.ExtraBold)) {
+                        withStyle(SpanStyle(color = palette.textPrimary, fontWeight = FontWeight.ExtraBold)) {
                             append("MY")
                         }
                         withStyle(SpanStyle(color = MyraColors.Crimson, fontWeight = FontWeight.ExtraBold)) {
@@ -379,7 +410,22 @@ private fun DarkTopBrandHeader(
                             fontFamily = JetBrainsMonoFontFamily,
                             fontWeight = FontWeight.Bold,
                             fontSize = 8.5.sp,
-                            color = Color(0xFFFFB3C1),
+                            color = if (palette.isDark) Color(0xFFFFB3C1) else MyraColors.Crimson,
+                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                        )
+                    }
+                } else if (isWakeWordActive && !isRunning) {
+                    Surface(
+                        shape = RoundedCornerShape(50),
+                        color = MyraColors.Crimson.copy(alpha = 0.14f),
+                        border = BorderStroke(1.dp, MyraColors.Crimson.copy(alpha = 0.45f))
+                    ) {
+                        Text(
+                            text = "HEY MYRA",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 8.5.sp,
+                            color = MyraColors.Crimson,
                             modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                         )
                     }
@@ -389,16 +435,17 @@ private fun DarkTopBrandHeader(
                 text = when {
                     isScreenSharing -> "SCREEN VISION ACTIVE"
                     isRunning -> "LIVE ASSISTANT"
+                    isWakeWordActive -> "WAKE WORD READY"
                     else -> "AI ASSISTANT"
                 },
                 fontFamily = JetBrainsMonoFontFamily,
                 fontSize = 9.sp,
                 letterSpacing = 2.sp,
-                color = if (isRunning || isScreenSharing) accentColor else Color(0xFF7C7C92)
+                color = if (isRunning || isScreenSharing) accentColor else palette.textMuted
             )
         }
 
-        // Right circular dark glass icon buttons (Notifications/Updates + Settings)
+        // Right circular glass icon buttons (Notifications/Updates + Settings)
         Row(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -406,8 +453,8 @@ private fun DarkTopBrandHeader(
             Surface(
                 onClick = onCheckUpdatesClick,
                 shape = CircleShape,
-                color = Color(0xFF13131D),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                color = palette.surfaceCard,
+                border = BorderStroke(1.dp, palette.borderSubtle),
                 modifier = Modifier
                     .minimumInteractiveComponentSize()
                     .size(48.dp)
@@ -417,7 +464,7 @@ private fun DarkTopBrandHeader(
                     Icon(
                         imageVector = Icons.Rounded.NotificationsNone,
                         contentDescription = "Check Updates",
-                        tint = Color(0xFFE0E0EA),
+                        tint = palette.textPrimary,
                         modifier = Modifier.size(21.dp)
                     )
                 }
@@ -426,8 +473,8 @@ private fun DarkTopBrandHeader(
             Surface(
                 onClick = onSettingsClick,
                 shape = CircleShape,
-                color = Color(0xFF13131D),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+                color = palette.surfaceCard,
+                border = BorderStroke(1.dp, palette.borderSubtle),
                 modifier = Modifier
                     .minimumInteractiveComponentSize()
                     .size(48.dp)
@@ -437,7 +484,7 @@ private fun DarkTopBrandHeader(
                     Icon(
                         imageVector = Icons.Rounded.Settings,
                         contentDescription = "Settings",
-                        tint = Color(0xFFE0E0EA),
+                        tint = palette.textPrimary,
                         modifier = Modifier.size(21.dp)
                     )
                 }
@@ -452,6 +499,7 @@ private fun HomeDashboardContent(
     isMuted: Boolean,
     isSpeaking: Boolean,
     isScreenSharing: Boolean,
+    isWakeWordActive: Boolean,
     orbState: OrbAnimationView.State,
     statusText: String,
     amplitude: Float,
@@ -465,6 +513,7 @@ private fun HomeDashboardContent(
     onVoiceModeClick: () -> Unit,
     onScreenShareClick: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -475,12 +524,12 @@ private fun HomeDashboardContent(
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 235.dp, max = 285.dp),
+                .heightIn(min = 230.dp, max = 278.dp),
             contentAlignment = Alignment.Center
         ) {
-            val orbSize = if (maxHeight < 250.dp) 186.dp else 218.dp
+            val orbSize = if (maxHeight < 250.dp) 186.dp else 214.dp
 
-            // Horizontal flowing silk ribbon backdrop matching reference image in dark crimson
+            // Horizontal flowing silk ribbon backdrop
             CrimsonSilkWaveBackdrop(
                 accentColor = accentColor,
                 isRunning = isRunning,
@@ -526,7 +575,7 @@ private fun HomeDashboardContent(
             }
         }
 
-        // GREETING + SUBTITLE
+        // GREETING + SUBTITLE + ANIMATED WAVEFORM / THINKING INDICATOR
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -534,7 +583,7 @@ private fun HomeDashboardContent(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             val headline = when {
-                !isRunning -> "Hello!"
+                !isRunning -> "Hello, ${telemetry.userName}!"
                 isSpeaking -> "Speaking..."
                 orbState == OrbAnimationView.State.THINKING -> "Thinking..."
                 isMuted -> "Muted"
@@ -544,29 +593,43 @@ private fun HomeDashboardContent(
                 text = headline,
                 fontFamily = SpaceGroteskFontFamily,
                 fontWeight = FontWeight.Bold,
-                fontSize = 30.sp,
-                color = Color.White,
-                textAlign = TextAlign.Center
+                fontSize = 28.sp,
+                color = palette.textPrimary,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
 
             Spacer(modifier = Modifier.height(4.dp))
 
             Text(
-                text = if (isRunning) statusText else "How can I help you today?",
+                text = when {
+                    isRunning -> statusText
+                    isWakeWordActive -> "Say \"Hey MYRA\" or tap the orb to talk"
+                    else -> "How can I help you today?"
+                },
                 fontFamily = PlusJakartaFontFamily,
-                fontSize = 14.5.sp,
-                color = Color(0xFF9E9EB4),
+                fontSize = 14.sp,
+                color = palette.textSecondary,
                 textAlign = TextAlign.Center,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
 
             if (isRunning) {
+                Spacer(modifier = Modifier.height(10.dp))
+                AudioWaveformStrip(
+                    amplitude = amplitude,
+                    orbState = orbState,
+                    isSpeaking = isSpeaking,
+                    isMuted = isMuted,
+                    accentColor = accentColor
+                )
                 Spacer(modifier = Modifier.height(8.dp))
                 Surface(
                     onClick = onVoiceModeClick,
                     shape = RoundedCornerShape(50),
-                    color = Color(0xFF280B16),
+                    color = palette.surfaceHighlight,
                     border = BorderStroke(1.dp, MyraColors.Crimson.copy(alpha = 0.45f))
                 ) {
                     Row(
@@ -585,14 +648,14 @@ private fun HomeDashboardContent(
                             fontFamily = PlusJakartaFontFamily,
                             fontWeight = FontWeight.SemiBold,
                             fontSize = 11.5.sp,
-                            color = Color(0xFFFFD6DF)
+                            color = palette.textPrimary
                         )
                     }
                 }
             }
         }
 
-        Spacer(modifier = Modifier.height(18.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         // MESSAGE INPUT PILL ("Type a message...")
         DarkMessageInputPill(
@@ -605,7 +668,7 @@ private fun HomeDashboardContent(
                 .padding(horizontal = 20.dp)
         )
 
-        Spacer(modifier = Modifier.height(22.dp))
+        Spacer(modifier = Modifier.height(20.dp))
 
         // "More" SECTION + TWO SIDE-BY-SIDE CARDS
         Column(
@@ -623,13 +686,13 @@ private fun HomeDashboardContent(
                     fontFamily = SpaceGroteskFontFamily,
                     fontWeight = FontWeight.Bold,
                     fontSize = 16.sp,
-                    color = Color.White
+                    color = palette.textPrimary
                 )
                 Text(
                     text = "${telemetry.personalityLabel} • ${telemetry.languageLabel}",
                     fontFamily = JetBrainsMonoFontFamily,
                     fontSize = 10.5.sp,
-                    color = Color(0xFF7B7B90)
+                    color = palette.textMuted
                 )
             }
 
@@ -824,13 +887,14 @@ private fun DarkMessageInputPill(
     onLeftActionClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalMyraPalette.current
     val keyboardController = LocalSoftwareKeyboardController.current
 
     Surface(
         modifier = modifier.height(54.dp),
         shape = RoundedCornerShape(27.dp),
-        color = Color(0xFF12121B),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.09f))
+        color = palette.surfaceCard,
+        border = BorderStroke(1.dp, palette.borderSubtle)
     ) {
         Row(
             modifier = Modifier
@@ -850,7 +914,7 @@ private fun DarkMessageInputPill(
                 Icon(
                     imageVector = Icons.Rounded.AttachFile,
                     contentDescription = "Quick prompts and actions",
-                    tint = Color(0xFF8C8CA4),
+                    tint = palette.textSecondary,
                     modifier = Modifier.size(20.dp)
                 )
             }
@@ -866,7 +930,7 @@ private fun DarkMessageInputPill(
                         text = "Type a message...",
                         fontFamily = PlusJakartaFontFamily,
                         fontSize = 14.sp,
-                        color = Color(0xFF727288)
+                        color = palette.textMuted
                     )
                 }
                 BasicTextField(
@@ -876,7 +940,7 @@ private fun DarkMessageInputPill(
                     textStyle = TextStyle(
                         fontFamily = PlusJakartaFontFamily,
                         fontSize = 14.sp,
-                        color = Color.White
+                        color = palette.textPrimary
                     ),
                     cursorBrush = SolidColor(MyraColors.Crimson),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
@@ -929,14 +993,15 @@ private fun FeatureActionCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalMyraPalette.current
     Surface(
         onClick = onClick,
         modifier = modifier.height(104.dp),
         shape = RoundedCornerShape(20.dp),
-        color = if (isHighlighted) Color(0xFF1A0D16) else Color(0xFF11111A),
+        color = if (isHighlighted) palette.surfaceHighlight else palette.surfaceCard,
         border = BorderStroke(
             width = 1.dp,
-            color = if (isHighlighted) MyraColors.Crimson.copy(alpha = 0.50f) else Color.White.copy(alpha = 0.07f)
+            color = if (isHighlighted) MyraColors.Crimson.copy(alpha = 0.50f) else palette.borderSubtle
         )
     ) {
         Column(
@@ -966,7 +1031,7 @@ private fun FeatureActionCard(
                     fontFamily = SpaceGroteskFontFamily,
                     fontWeight = FontWeight.Bold,
                     fontSize = 14.sp,
-                    color = Color.White,
+                    color = palette.textPrimary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -974,7 +1039,7 @@ private fun FeatureActionCard(
                     text = subtitle,
                     fontFamily = PlusJakartaFontFamily,
                     fontSize = 11.5.sp,
-                    color = Color(0xFF8A8AA0),
+                    color = palette.textSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -996,6 +1061,7 @@ private fun BottomNavigationDock(
     onMicLongPress: () -> Unit,
     onSettingsClick: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     val haptic = LocalHapticFeedback.current
     val micActive = isRunning && !isMuted
     val micScale by animateFloatAsState(
@@ -1007,7 +1073,7 @@ private fun BottomNavigationDock(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF0B0B12))
+            .background(palette.dockBackground)
             .navigationBarsPadding(),
         contentAlignment = Alignment.TopCenter
     ) {
@@ -1016,7 +1082,7 @@ private fun BottomNavigationDock(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(1.dp)
-                .background(Color.White.copy(alpha = 0.07f))
+                .background(palette.borderSubtle)
                 .align(Alignment.TopCenter)
         )
 
@@ -1052,7 +1118,7 @@ private fun BottomNavigationDock(
 
             BottomNavItem(
                 icon = Icons.Rounded.Bolt,
-                label = "Triggers",
+                label = "Controls",
                 selected = activeTab == HomeTab.TRIGGERS,
                 onClick = { onSelectTab(HomeTab.TRIGGERS) },
                 modifier = Modifier
@@ -1134,6 +1200,7 @@ private fun BottomNavItem(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalMyraPalette.current
     Box(
         modifier = modifier
             .height(54.dp)
@@ -1149,7 +1216,7 @@ private fun BottomNavItem(
             Icon(
                 imageVector = icon,
                 contentDescription = label,
-                tint = if (selected) MyraColors.Crimson else Color(0xFF7C7C92),
+                tint = if (selected) MyraColors.Crimson else palette.textMuted,
                 modifier = Modifier.size(21.dp)
             )
             Text(
@@ -1157,7 +1224,7 @@ private fun BottomNavItem(
                 fontFamily = PlusJakartaFontFamily,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 fontSize = 10.5.sp,
-                color = if (selected) MyraColors.Crimson else Color(0xFF7C7C92)
+                color = if (selected) MyraColors.Crimson else palette.textMuted
             )
         }
     }
@@ -1174,6 +1241,7 @@ private fun ChatTabContent(
     onSendMessage: () -> Unit,
     onOpenQuickActions: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     val listState = rememberLazyListState()
 
     LaunchedEffect(messages.size) {
@@ -1190,8 +1258,8 @@ private fun ChatTabContent(
         // Live session status banner
         Surface(
             shape = RoundedCornerShape(16.dp),
-            color = Color(0xFF11111A),
-            border = BorderStroke(1.dp, Color.White.copy(alpha = 0.07f)),
+            color = palette.surfaceCard,
+            border = BorderStroke(1.dp, palette.borderSubtle),
             modifier = Modifier.fillMaxWidth()
         ) {
             Row(
@@ -1203,13 +1271,13 @@ private fun ChatTabContent(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(if (isRunning) accentColor else Color(0xFF555568))
+                        .background(if (isRunning) accentColor else palette.textMuted)
                 )
                 Text(
                     text = if (isRunning) statusText else "Send a message or tap the mic orb to start talking",
                     fontFamily = PlusJakartaFontFamily,
                     fontSize = 12.5.sp,
-                    color = Color(0xFFC2C2D4),
+                    color = palette.textSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1241,13 +1309,13 @@ private fun ChatTabContent(
                         fontFamily = SpaceGroteskFontFamily,
                         fontWeight = FontWeight.Bold,
                         fontSize = 17.sp,
-                        color = Color.White
+                        color = palette.textPrimary
                     )
                     Text(
                         text = "Type a message below or tap the center microphone to speak with MYRA.",
                         fontFamily = PlusJakartaFontFamily,
                         fontSize = 13.sp,
-                        color = Color(0xFF8C8CA4),
+                        color = palette.textSecondary,
                         textAlign = TextAlign.Center
                     )
                 }
@@ -1287,6 +1355,7 @@ private fun ChatBubbleItem(
     message: ChatMessage,
     accentColor: Color
 ) {
+    val palette = LocalMyraPalette.current
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (message.isUser) Arrangement.End else Arrangement.Start,
@@ -1321,7 +1390,7 @@ private fun ChatBubbleItem(
                 bottomStart = 18.dp,
                 bottomEnd = 18.dp
             ),
-            color = if (message.isUser) Color(0xFF280D18) else Color(0xFF14141F),
+            color = if (message.isUser) palette.surfaceHighlight else palette.surfaceCard,
             border = BorderStroke(
                 width = 1.dp,
                 color = if (message.isUser) MyraColors.Crimson.copy(alpha = 0.45f) else accentColor.copy(alpha = 0.16f)
@@ -1333,206 +1402,9 @@ private fun ChatBubbleItem(
                 fontFamily = PlusJakartaFontFamily,
                 fontSize = 13.5.sp,
                 lineHeight = 19.sp,
-                color = MyraColors.TextPrimary,
+                color = palette.textPrimary,
                 modifier = Modifier.padding(horizontal = 13.dp, vertical = 9.dp)
             )
-        }
-    }
-}
-
-@Composable
-private fun TriggersTabContent(
-    telemetry: HomeTelemetryState,
-    isRunning: Boolean,
-    isScreenSharing: Boolean,
-    accentColor: Color,
-    onStartStopClick: () -> Unit,
-    onScreenShareClick: () -> Unit,
-    onOpenOverlaySettings: () -> Unit,
-    onOpenAccessibilitySettings: () -> Unit,
-    onExecuteQuickCommand: (AppCommand) -> Unit
-) {
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 18.dp),
-        contentPadding = PaddingValues(top = 8.dp, bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        item {
-            Text(
-                text = "System & Triggers",
-                fontFamily = SpaceGroteskFontFamily,
-                fontWeight = FontWeight.Bold,
-                fontSize = 18.sp,
-                color = Color.White
-            )
-            Text(
-                text = "Background voice, screen vision, floating Siri orb, and quick device actions",
-                fontFamily = PlusJakartaFontFamily,
-                fontSize = 12.5.sp,
-                color = Color(0xFF8C8CA4)
-            )
-        }
-
-        item {
-            TriggerStatusRowCard(
-                icon = Icons.Rounded.GraphicEq,
-                title = "Background AI Session",
-                subtitle = if (isRunning) "Running live in background" else "Inactive — tap to wake MYRA",
-                statusLabel = if (isRunning) "ACTIVE" else "START",
-                isActive = isRunning,
-                accentColor = accentColor,
-                onClick = onStartStopClick
-            )
-        }
-
-        item {
-            TriggerStatusRowCard(
-                icon = if (isScreenSharing) Icons.Rounded.StopScreenShare else Icons.Rounded.ScreenShare,
-                title = "Live Screen Share",
-                subtitle = if (isScreenSharing) "MYRA can see your phone screen now" else "Say \"screen share on koro\" or tap to share",
-                statusLabel = if (isScreenSharing) "LIVE" else "SHARE",
-                isActive = isScreenSharing,
-                accentColor = accentColor,
-                onClick = onScreenShareClick
-            )
-        }
-
-        item {
-            TriggerStatusRowCard(
-                icon = Icons.Rounded.AutoAwesome,
-                title = "Floating Siri Orb",
-                subtitle = "Shows glowing orb on screen when you leave MYRA",
-                statusLabel = if (telemetry.isOverlayEnabled) "ON" else "ENABLE",
-                isActive = telemetry.isOverlayEnabled,
-                accentColor = accentColor,
-                onClick = onOpenOverlaySettings
-            )
-        }
-
-        item {
-            TriggerStatusRowCard(
-                icon = Icons.Rounded.AccessibilityNew,
-                title = "Accessibility Helper",
-                subtitle = "Allows voice control to open & close apps",
-                statusLabel = if (telemetry.isAccessibilityEnabled) "ON" else "ENABLE",
-                isActive = telemetry.isAccessibilityEnabled,
-                accentColor = accentColor,
-                onClick = onOpenAccessibilitySettings
-            )
-        }
-
-        item {
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Instant Controls",
-                fontFamily = SpaceGroteskFontFamily,
-                fontWeight = FontWeight.Bold,
-                fontSize = 15.sp,
-                color = Color.White
-            )
-        }
-
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                FeatureActionCard(
-                    icon = Icons.Rounded.FlashlightOn,
-                    title = "Torch On",
-                    subtitle = "Toggle flashlight",
-                    isHighlighted = false,
-                    onClick = { onExecuteQuickCommand(AppCommand(AppCommand.TYPE_FLASHLIGHT_ON)) },
-                    modifier = Modifier.weight(1f)
-                )
-                FeatureActionCard(
-                    icon = Icons.Rounded.Call,
-                    title = "Prime Call",
-                    subtitle = "Call primary contact",
-                    isHighlighted = false,
-                    onClick = {
-                        onExecuteQuickCommand(
-                            AppCommand(AppCommand.TYPE_PRIME_CALL, mapOf("index" to "0"))
-                        )
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun TriggerStatusRowCard(
-    icon: ImageVector,
-    title: String,
-    subtitle: String,
-    statusLabel: String,
-    isActive: Boolean,
-    accentColor: Color,
-    onClick: () -> Unit
-) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(18.dp),
-        color = Color(0xFF11111A),
-        border = BorderStroke(
-            1.dp,
-            if (isActive) accentColor.copy(alpha = 0.35f) else Color.White.copy(alpha = 0.07f)
-        ),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier.padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(MyraColors.Crimson.copy(alpha = 0.14f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = title,
-                    tint = MyraColors.Crimson,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    fontFamily = SpaceGroteskFontFamily,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp,
-                    color = Color.White
-                )
-                Text(
-                    text = subtitle,
-                    fontFamily = PlusJakartaFontFamily,
-                    fontSize = 12.sp,
-                    color = Color(0xFF8C8CA4)
-                )
-            }
-
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = if (isActive) MyraColors.Emerald.copy(alpha = 0.15f) else MyraColors.Crimson.copy(alpha = 0.16f)
-            ) {
-                Text(
-                    text = statusLabel,
-                    fontFamily = JetBrainsMonoFontFamily,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 10.5.sp,
-                    color = if (isActive) MyraColors.Emerald else MyraColors.Crimson,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                )
-            }
         }
     }
 }
@@ -1542,6 +1414,7 @@ private fun QuickActionsSheetContent(
     onSelectPrompt: (String) -> Unit,
     onRunCommand: (AppCommand) -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1554,7 +1427,7 @@ private fun QuickActionsSheetContent(
             fontFamily = SpaceGroteskFontFamily,
             fontWeight = FontWeight.Bold,
             fontSize = 18.sp,
-            color = Color.White
+            color = palette.textPrimary
         )
 
         Row(
@@ -1586,19 +1459,41 @@ private fun QuickActionsSheetContent(
             horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             QuickChipButton(
-                icon = Icons.Rounded.OpenInNew,
-                label = "YouTube",
-                onClick = {
-                    onRunCommand(AppCommand(AppCommand.TYPE_OPEN_APP, mapOf("app_name" to "YouTube")))
-                },
+                icon = Icons.Rounded.WbSunny,
+                label = "Weather",
+                onClick = { onRunCommand(AppCommand(AppCommand.TYPE_WEATHER)) },
                 modifier = Modifier.weight(1f)
             )
+            QuickChipButton(
+                icon = Icons.Rounded.BatteryChargingFull,
+                label = "Battery",
+                onClick = { onRunCommand(AppCommand(AppCommand.TYPE_BATTERY_INFO)) },
+                modifier = Modifier.weight(1f)
+            )
+            QuickChipButton(
+                icon = Icons.Rounded.Screenshot,
+                label = "Screenshot",
+                onClick = { onRunCommand(AppCommand(AppCommand.TYPE_TAKE_SCREENSHOT)) },
+                modifier = Modifier.weight(1f)
+            )
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
             QuickChipButton(
                 icon = Icons.Rounded.OpenInNew,
                 label = "WhatsApp",
                 onClick = {
                     onRunCommand(AppCommand(AppCommand.TYPE_OPEN_APP, mapOf("app_name" to "WhatsApp")))
                 },
+                modifier = Modifier.weight(1f)
+            )
+            QuickChipButton(
+                icon = Icons.Rounded.PhotoCamera,
+                label = "Take Photo",
+                onClick = { onRunCommand(AppCommand(AppCommand.TYPE_TAKE_PHOTO)) },
                 modifier = Modifier.weight(1f)
             )
             QuickChipButton(
@@ -1614,17 +1509,17 @@ private fun QuickActionsSheetContent(
         Spacer(modifier = Modifier.height(4.dp))
 
         val prompts = listOf(
-            "Ask MYRA: Ajker weather ba din ta kemon?",
-            "Ask MYRA: Ekta mojaar golpo bolo",
-            "Ask MYRA: Amar din ta plan korte help koro"
+            "Ask MYRA: Ajker weather kemon?",
+            "Ask MYRA: Amar battery ar device info bolo",
+            "Ask MYRA: Remember that I prefer concise replies"
         )
         prompts.forEach { item ->
             val cleanPrompt = item.removePrefix("Ask MYRA: ")
             Surface(
                 onClick = { onSelectPrompt(cleanPrompt) },
                 shape = RoundedCornerShape(14.dp),
-                color = Color(0xFF171723),
-                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.07f)),
+                color = palette.surfaceAlt,
+                border = BorderStroke(1.dp, palette.borderSubtle),
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
@@ -1642,7 +1537,7 @@ private fun QuickActionsSheetContent(
                         text = cleanPrompt,
                         fontFamily = PlusJakartaFontFamily,
                         fontSize = 13.5.sp,
-                        color = Color.White
+                        color = palette.textPrimary
                     )
                 }
             }
@@ -1659,11 +1554,12 @@ private fun QuickChipButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val palette = LocalMyraPalette.current
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(14.dp),
-        color = Color(0xFF171723),
-        border = BorderStroke(1.dp, Color.White.copy(alpha = 0.08f)),
+        color = palette.surfaceAlt,
+        border = BorderStroke(1.dp, palette.borderSubtle),
         modifier = modifier.height(52.dp)
     ) {
         Row(
@@ -1683,7 +1579,7 @@ private fun QuickChipButton(
                 fontFamily = PlusJakartaFontFamily,
                 fontWeight = FontWeight.Medium,
                 fontSize = 12.sp,
-                color = Color.White,
+                color = palette.textPrimary,
                 maxLines = 1
             )
         }

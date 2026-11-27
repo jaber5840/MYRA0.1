@@ -1,11 +1,16 @@
 package com.myra.assistant.ui.theme
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
@@ -35,6 +40,56 @@ object MyraColors {
     val TextSecondary = Color(0xFF9B9BB0)
     val TextMuted = Color(0xFF6B6B80)
 }
+
+@Immutable
+data class MyraUiPalette(
+    val isDark: Boolean,
+    val background: Color,
+    val backgroundTop: Color,
+    val backgroundBottom: Color,
+    val surfaceCard: Color,
+    val surfaceAlt: Color,
+    val surfaceHighlight: Color,
+    val dockBackground: Color,
+    val textPrimary: Color,
+    val textSecondary: Color,
+    val textMuted: Color,
+    val borderSubtle: Color,
+    val accent: Color = MyraColors.Crimson,
+    val pinkGlow: Color = MyraColors.RoseGlow
+)
+
+private val DarkPalette = MyraUiPalette(
+    isDark = true,
+    background = Color(0xFF06060B),
+    backgroundTop = Color(0xFF0B0A11),
+    backgroundBottom = Color(0xFF08070D),
+    surfaceCard = Color(0xFF11111A),
+    surfaceAlt = Color(0xFF171723),
+    surfaceHighlight = Color(0xFF1A0D16),
+    dockBackground = Color(0xFF0B0B12),
+    textPrimary = Color(0xFFF5F5FA),
+    textSecondary = Color(0xFF9E9EB4),
+    textMuted = Color(0xFF727288),
+    borderSubtle = Color.White.copy(alpha = 0.08f)
+)
+
+private val LightPalette = MyraUiPalette(
+    isDark = false,
+    background = Color(0xFFF8F7FB),
+    backgroundTop = Color(0xFFFFFFFF),
+    backgroundBottom = Color(0xFFF2EEF6),
+    surfaceCard = Color(0xFFFFFFFF),
+    surfaceAlt = Color(0xFFF1EFF7),
+    surfaceHighlight = Color(0xFFFFEDF2),
+    dockBackground = Color(0xFFFFFFFF),
+    textPrimary = Color(0xFF12121A),
+    textSecondary = Color(0xFF56566A),
+    textMuted = Color(0xFF7D7D94),
+    borderSubtle = Color(0xFF12121A).copy(alpha = 0.09f)
+)
+
+val LocalMyraPalette = staticCompositionLocalOf { DarkPalette }
 
 val SpaceGroteskFontFamily = FontFamily(
     Font(R.font.space_grotesk, FontWeight.Normal),
@@ -72,6 +127,24 @@ private val MyraDarkColorScheme = darkColorScheme(
     surfaceVariant = MyraColors.SurfaceElevated,
     onSurfaceVariant = MyraColors.TextSecondary,
     outline = MyraColors.BorderSubtle
+)
+
+private val MyraLightColorScheme = lightColorScheme(
+    primary = MyraColors.Crimson,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFFFD9DF),
+    onPrimaryContainer = Color(0xFF4A081A),
+    secondary = MyraColors.Violet,
+    onSecondary = Color.White,
+    tertiary = MyraColors.Cyan,
+    onTertiary = Color.White,
+    background = LightPalette.background,
+    onBackground = LightPalette.textPrimary,
+    surface = LightPalette.surfaceCard,
+    onSurface = LightPalette.textPrimary,
+    surfaceVariant = LightPalette.surfaceAlt,
+    onSurfaceVariant = LightPalette.textSecondary,
+    outline = LightPalette.borderSubtle
 )
 
 val MyraTypography = Typography(
@@ -120,11 +193,24 @@ val MyraShapes = Shapes(
 )
 
 @Composable
-fun MyraTheme(content: @Composable () -> Unit) {
-    MaterialTheme(
-        colorScheme = MyraDarkColorScheme,
-        typography = MyraTypography,
-        shapes = MyraShapes,
-        content = content
-    )
+fun MyraTheme(
+    themeMode: String = "DARK",
+    content: @Composable () -> Unit
+) {
+    val useDark = when (themeMode.uppercase()) {
+        "LIGHT" -> false
+        "SYSTEM" -> isSystemInDarkTheme()
+        else -> true
+    }
+    val palette = if (useDark) DarkPalette else LightPalette
+    val colorScheme = if (useDark) MyraDarkColorScheme else MyraLightColorScheme
+
+    CompositionLocalProvider(LocalMyraPalette provides palette) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = MyraTypography,
+            shapes = MyraShapes,
+            content = content
+        )
+    }
 }

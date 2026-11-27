@@ -65,6 +65,14 @@ class AccessibilityHelperService : AccessibilityService() {
         return performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
+    fun takeScreenshotAction(): Boolean {
+        return if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            performGlobalAction(GLOBAL_ACTION_TAKE_SCREENSHOT)
+        } else {
+            false
+        }
+    }
+
     fun clickOnText(text: String): Boolean {
         val root = rootInActiveWindow ?: return false
         val nodes = root.findAccessibilityNodeInfosByText(text)

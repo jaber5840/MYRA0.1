@@ -31,6 +31,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
@@ -42,13 +43,16 @@ import com.myra.assistant.service.MyraOverlayService
 import com.myra.assistant.service.MyraVoiceService
 import com.myra.assistant.service.MyraVoiceSession
 import com.myra.assistant.service.ScreenCaptureService
+import com.myra.assistant.service.WakeWordManager
 import com.myra.assistant.ui.settings.SettingsActivity
+import com.myra.assistant.ui.settings.SettingsCategory
 import com.myra.assistant.ui.theme.MyraTheme
 import com.myra.assistant.update.GitHubUpdateChecker
 import com.myra.assistant.update.RemoteConfigUpdateManager
 import com.myra.assistant.update.UpdateDialogHelper
 import com.myra.assistant.viewmodel.MainViewModel
 import kotlinx.coroutines.launch
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -61,9 +65,12 @@ class MainActivity : AppCompatActivity() {
 
     private val viewModel: MainViewModel by viewModels()
     private var speechRecognizer: SpeechRecognizer? = null
+    private var wakeWordManager: WakeWordManager? = null
     private var pendingStartAfterPermission = false
     private var navigatingToSettings = false
     private var overlayPromptShownThisRun = false
+    private var isActivityResumed = false
+    private var pendingPhotoFile: File? = null
 
     private val telemetryState = mutableStateOf(HomeTelemetryState())
     private val handler = Handler(Looper.getMainLooper())
@@ -90,6 +97,7 @@ class MainActivity : AppCompatActivity() {
         val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
         if (recordAudioGranted) {
             startSystemServices()
+            syncWakeWordState()
             if (pendingStartAfterPermission) {
                 pendingStartAfterPermission = false
                 startAiAssistant()
@@ -97,6 +105,19 @@ class MainActivity : AppCompatActivity() {
         } else {
             pendingStartAfterPermission = false
             Toast.makeText(this, "Microphone permission is required for MYRA", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private val takePictureLauncher = registerForActivityResult(
+        ActivityResultContracts.TakePicture()
+    ) { success ->
+        val photoName = pendingPhotoFile?.name ?: "photo"
+        if (success) {
+            val msg = "Photo captured ($photoName)."
+            MyraVoiceSession.addMyraMessage(msg)
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Photo capture cancelled", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -149,10 +170,23 @@ class MainActivity : AppCompatActivity() {
         )
         super.onCreate(savedInstanceState)
 
+        MyraVoiceSession.loadPersistedState(this)
         updateSystemStatus()
 
+        wakeWordManager = WakeWordManager(this) { trailingCommand ->
+            runOnUiThread {
+                Toast.makeText(this, "Hey MYRA detected", Toast.LENGTH_SHORT).show()
+                if (!trailingCommand.isNullOrBlank()) {
+                    sendTypedMessageToMyra(trailingCommand)
+                } else {
+                    startAiAssistant()
+                }
+            }
+        }
+
         setContent {
-            MyraTheme {
+            val themeMode by MyraVoiceSession.themeMode.collectAsStateWithLifecycle()
+            MyraTheme(themeMode = themeMode) {
                 val isRunning by MyraVoiceSession.isRunning.collectAsStateWithLifecycle()
                 val isMuted by MyraVoiceSession.isMuted.collectAsStateWithLifecycle()
                 val isSpeaking by MyraVoiceSession.isSpeaking.collectAsStateWithLifecycle()
@@ -161,6 +195,10 @@ class MainActivity : AppCompatActivity() {
                 val amplitude by MyraVoiceSession.amplitude.collectAsStateWithLifecycle()
                 val messages by MyraVoiceSession.messages.collectAsStateWithLifecycle()
                 val isScreenSharing by MyraVoiceSession.isScreenSharing.collectAsStateWithLifecycle()
+                val isWakeWordActive by MyraVoiceSession.isWakeWordActive.collectAsStateWithLifecycle()
+                val isFlashlightOn by MyraVoiceSession.isFlashlightOn.collectAsStateWithLifecycle()
+                val pendingConfirmation by MyraVoiceSession.pendingConfirmation.collectAsStateWithLifecycle()
+                val commandHistory by MyraVoiceSession.commandHistory.collectAsStateWithLifecycle()
                 val telemetry by telemetryState
 
                 HomeScreen(
@@ -168,10 +206,14 @@ class MainActivity : AppCompatActivity() {
                     isMuted = isMuted,
                     isSpeaking = isSpeaking,
                     isScreenSharing = isScreenSharing,
+                    isWakeWordActive = isWakeWordActive,
+                    isFlashlightOn = isFlashlightOn,
                     orbState = orbState,
                     statusText = statusText,
                     amplitude = amplitude,
                     messages = messages,
+                    commandHistory = commandHistory,
+                    pendingConfirmation = pendingConfirmation,
                     telemetry = telemetry,
                     onStartStopClick = {
                         if (MyraVoiceSession.isRunning.value) {
@@ -206,6 +248,15 @@ class MainActivity : AppCompatActivity() {
                     onExecuteQuickCommand = { cmd ->
                         viewModel.executeCommand(cmd)
                     },
+                    onConfirmPending = {
+                        viewModel.confirmPendingAction()
+                    },
+                    onCancelPending = {
+                        viewModel.cancelPendingAction()
+                    },
+                    onClearHistory = {
+                        MyraVoiceSession.clearCommandHistory(this@MainActivity)
+                    },
                     onCheckUpdatesClick = {
                         checkForUpdatesManually()
                     },
@@ -222,6 +273,14 @@ class MainActivity : AppCompatActivity() {
                         navigatingToSettings = true
                         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     },
+                    onOpenPermissionsSettings = {
+                        navigatingToSettings = true
+                        startActivity(
+                            Intent(this@MainActivity, SettingsActivity::class.java).apply {
+                                putExtra(SettingsActivity.EXTRA_INITIAL_CATEGORY, SettingsCategory.SYSTEM_PERMISSIONS.name)
+                            }
+                        )
+                    },
                     onSettingsClick = {
                         navigatingToSettings = true
                         startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
@@ -232,6 +291,8 @@ class MainActivity : AppCompatActivity() {
 
         observeSessionErrors()
         observeScreenShareCommands()
+        observeCameraCaptureCommands()
+        observeRunningForWakeWord()
         checkAndRequestPermissions(autoStart = false)
         startStatusUpdates()
 
@@ -278,6 +339,54 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+        }
+    }
+
+    private fun observeCameraCaptureCommands() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                MyraVoiceSession.cameraCaptureEvents.collect {
+                    launchTakePhotoFlow()
+                }
+            }
+        }
+    }
+
+    private fun observeRunningForWakeWord() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                MyraVoiceSession.isRunning.collect {
+                    syncWakeWordState()
+                }
+            }
+        }
+    }
+
+    private fun launchTakePhotoFlow() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Grant Camera permission in Settings > Permission Manager first", Toast.LENGTH_SHORT).show()
+            requestPermissionsLauncher.launch(arrayOf(Manifest.permission.CAMERA))
+            return
+        }
+        try {
+            val photosDir = File(cacheDir, "photos").apply { mkdirs() }
+            val photoFile = File(photosDir, "MYRA_${System.currentTimeMillis()}.jpg")
+            pendingPhotoFile = photoFile
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", photoFile)
+            navigatingToSettings = true
+            takePictureLauncher.launch(uri)
+        } catch (e: Exception) {
+            Toast.makeText(this, "Unable to launch camera: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun syncWakeWordState() {
+        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+        val wakeWordEnabled = prefs.getBoolean("wake_word_enabled", false)
+        if (isActivityResumed && wakeWordEnabled && !MyraVoiceSession.isRunning.value) {
+            wakeWordManager?.start()
+        } else {
+            wakeWordManager?.stop()
         }
     }
 
@@ -642,10 +751,18 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        isActivityResumed = true
         updateSystemStatus()
+        syncWakeWordState()
         if (MyraVoiceSession.isRunning.value) {
             sendServiceAction(MyraVoiceService.ACTION_RECONNECT_IF_CONFIG_CHANGED)
         }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        isActivityResumed = false
+        wakeWordManager?.stop()
     }
 
     override fun onStop() {
@@ -669,6 +786,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(statusUpdateRunnable)
+        wakeWordManager?.destroy()
+        wakeWordManager = null
         try {
             unregisterReceiver(callEndedReceiver)
         } catch (_: Exception) {}

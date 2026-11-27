@@ -17,10 +17,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _commandResult = MutableLiveData<String?>()
     val commandResult: LiveData<String?> = _commandResult
 
-    fun executeCommand(command: AppCommand) {
+    fun executeCommand(command: AppCommand, rawInput: String = "") {
         viewModelScope.launch(Dispatchers.IO) {
-            val result = executor.executeCommand(command)
+            val result = executor.executeCommand(command, rawInput)
             if (!result.isNullOrEmpty()) {
+                _commandResult.postValue(result)
+            }
+        }
+    }
+
+    fun confirmPendingAction() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = executor.confirmPendingAction()
+            if (result.isNotEmpty()) {
+                _commandResult.postValue(result)
+            }
+        }
+    }
+
+    fun cancelPendingAction() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = executor.cancelPendingAction()
+            if (result.isNotEmpty()) {
                 _commandResult.postValue(result)
             }
         }

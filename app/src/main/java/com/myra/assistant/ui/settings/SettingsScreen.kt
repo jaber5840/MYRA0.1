@@ -1,5 +1,6 @@
 package com.myra.assistant.ui.settings
 
+import android.Manifest
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
@@ -50,7 +51,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -58,9 +58,10 @@ import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -79,153 +80,152 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-
-private val MyraBg = Color(0xFF050508)
-private val MyraSurface = Color(0xFF111118)
-private val MyraSurfaceAlt = Color(0xFF181822)
-private val MyraCrimson = Color(0xFFFF1744)
-private val MyraViolet = Color(0xFFD500F9)
-private val MyraTextPrimary = Color(0xFFF3F3F7)
-private val MyraTextSecondary = Color(0xFF9E9EAE)
-private val MyraSuccess = Color(0xFF00E676)
-
-private val MyraDarkScheme = darkColorScheme(
-    primary = MyraCrimson,
-    secondary = MyraViolet,
-    background = MyraBg,
-    surface = MyraSurface,
-    onPrimary = Color.White,
-    onBackground = MyraTextPrimary,
-    onSurface = MyraTextPrimary
-)
+import com.myra.assistant.ui.theme.LocalMyraPalette
+import com.myra.assistant.ui.theme.MyraColors
 
 @Composable
 fun MyraSettingsScreen(
     state: SettingsUiState,
+    initialCategory: SettingsCategory? = null,
     onApiKeyChange: (String) -> Unit,
     onUserNameChange: (String) -> Unit,
     onModelSelected: (String) -> Unit,
     onVoiceSelected: (String) -> Unit,
+    onResponseStyleSelected: (String) -> Unit,
+    onWakeWordToggle: (Boolean) -> Unit,
     onPersonalitySelected: (String) -> Unit,
     onLanguageSelected: (String) -> Unit,
+    onThemeModeSelected: (String) -> Unit,
+    onMemoryConsentToggle: (Boolean) -> Unit,
+    onClearMemoryClick: () -> Unit,
     onAddPrimeContact: (String, String) -> Unit,
     onDeletePrimeContact: (Int) -> Unit,
     onTestApiClick: () -> Unit,
+    onRequestRuntimePermission: (String) -> Unit,
+    onOpenWriteSettingsClick: () -> Unit,
     onOpenAccessibilityClick: () -> Unit,
     onOpenOverlayClick: () -> Unit,
+    onOpenNotificationAccessClick: () -> Unit,
     onCheckUpdatesClick: () -> Unit,
     onSaveClick: () -> Unit,
     onCloseClick: () -> Unit
 ) {
-    var selectedCategory by remember { mutableStateOf<SettingsCategory?>(null) }
+    val palette = LocalMyraPalette.current
+    var selectedCategory by remember(initialCategory) { mutableStateOf(initialCategory) }
 
     BackHandler(enabled = selectedCategory != null) {
         selectedCategory = null
     }
 
-    MaterialTheme(colorScheme = MyraDarkScheme) {
-        Scaffold(
-            containerColor = MyraBg,
-            contentWindowInsets = WindowInsets.safeDrawing,
-            topBar = {
-                SettingsTopBar(
-                    title = selectedCategory?.title ?: "SETTINGS",
-                    isSubScreen = selectedCategory != null,
-                    onBack = {
-                        if (selectedCategory != null) {
-                            selectedCategory = null
-                        } else {
-                            onCloseClick()
-                        }
-                    }
-                )
-            },
-            bottomBar = {
-                if (selectedCategory != null) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .background(MyraBg)
-                            .navigationBarsPadding()
-                            .padding(horizontal = 20.dp, vertical = 12.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        GradientPrimaryButton(
-                            text = "SAVE & APPLY",
-                            onClick = {
-                                onSaveClick()
-                                selectedCategory = null
-                            },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .widthIn(max = 600.dp)
-                                .testTag("save_category_button")
-                        )
+    Scaffold(
+        containerColor = palette.background,
+        contentWindowInsets = WindowInsets.safeDrawing,
+        topBar = {
+            SettingsTopBar(
+                title = selectedCategory?.title ?: "SETTINGS",
+                isSubScreen = selectedCategory != null,
+                onBack = {
+                    if (selectedCategory != null) {
+                        selectedCategory = null
+                    } else {
+                        onCloseClick()
                     }
                 }
+            )
+        },
+        bottomBar = {
+            if (selectedCategory != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(palette.background)
+                        .navigationBarsPadding()
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    GradientPrimaryButton(
+                        text = "SAVE & APPLY",
+                        onClick = {
+                            onSaveClick()
+                            selectedCategory = null
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .widthIn(max = 600.dp)
+                            .testTag("save_category_button")
+                    )
+                }
             }
-        ) { innerPadding ->
-            Box(
+        }
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            AnimatedContent(
+                targetState = selectedCategory,
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(innerPadding),
-                contentAlignment = Alignment.TopCenter
-            ) {
-                AnimatedContent(
-                    targetState = selectedCategory,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .widthIn(max = 600.dp),
-                    transitionSpec = {
-                        if (targetState != null) {
-                            (slideInHorizontally { it / 3 } + fadeIn()) togetherWith
-                                (slideOutHorizontally { -it / 4 } + fadeOut())
-                        } else {
-                            (slideInHorizontally { -it / 3 } + fadeIn()) togetherWith
-                                (slideOutHorizontally { it / 4 } + fadeOut())
-                        }
-                    },
-                    label = "settings_category_transition"
-                ) { category ->
-                    if (category == null) {
-                        SettingsCategoryHub(
-                            state = state,
-                            onSelectCategory = { selectedCategory = it },
-                            onSaveAndExit = onSaveClick
-                        )
+                    .widthIn(max = 600.dp),
+                transitionSpec = {
+                    if (targetState != null) {
+                        (slideInHorizontally { it / 3 } + fadeIn()) togetherWith
+                            (slideOutHorizontally { -it / 4 } + fadeOut())
                     } else {
-                        when (category) {
-                            SettingsCategory.API_CONNECTION -> ApiConnectionCategory(
-                                state = state,
-                                onApiKeyChange = onApiKeyChange,
-                                onTestApiClick = onTestApiClick
-                            )
-                            SettingsCategory.VOICE_MODEL -> VoiceAndModelCategory(
-                                state = state,
-                                onModelSelected = onModelSelected,
-                                onVoiceSelected = onVoiceSelected
-                            )
-                            SettingsCategory.LANGUAGE_PERSONALITY -> LanguageAndPersonalityCategory(
-                                state = state,
-                                onLanguageSelected = onLanguageSelected,
-                                onPersonalitySelected = onPersonalitySelected
-                            )
-                            SettingsCategory.PROFILE_CONTACTS -> ProfileAndContactsCategory(
-                                state = state,
-                                onUserNameChange = onUserNameChange,
-                                onAddPrimeContact = onAddPrimeContact,
-                                onDeletePrimeContact = onDeletePrimeContact
-                            )
-                            SettingsCategory.SYSTEM_PERMISSIONS -> SystemPermissionsCategory(
-                                state = state,
-                                onOpenAccessibilityClick = onOpenAccessibilityClick,
-                                onOpenOverlayClick = onOpenOverlayClick
-                            )
-                            SettingsCategory.APP_UPDATES -> AppUpdatesCategory(
-                                state = state,
-                                onCheckUpdatesClick = onCheckUpdatesClick
-                            )
-                        }
+                        (slideInHorizontally { -it / 3 } + fadeIn()) togetherWith
+                            (slideOutHorizontally { it / 4 } + fadeOut())
+                    }
+                },
+                label = "settings_category_transition"
+            ) { category ->
+                if (category == null) {
+                    SettingsCategoryHub(
+                        state = state,
+                        onSelectCategory = { selectedCategory = it },
+                        onSaveAndExit = onSaveClick
+                    )
+                } else {
+                    when (category) {
+                        SettingsCategory.API_CONNECTION -> ApiConnectionCategory(
+                            state = state,
+                            onApiKeyChange = onApiKeyChange,
+                            onTestApiClick = onTestApiClick
+                        )
+                        SettingsCategory.VOICE_MODEL -> VoiceAndModelCategory(
+                            state = state,
+                            onModelSelected = onModelSelected,
+                            onVoiceSelected = onVoiceSelected,
+                            onResponseStyleSelected = onResponseStyleSelected,
+                            onWakeWordToggle = onWakeWordToggle
+                        )
+                        SettingsCategory.LANGUAGE_PERSONALITY -> LanguageAndPersonalityCategory(
+                            state = state,
+                            onLanguageSelected = onLanguageSelected,
+                            onPersonalitySelected = onPersonalitySelected,
+                            onThemeModeSelected = onThemeModeSelected,
+                            onMemoryConsentToggle = onMemoryConsentToggle,
+                            onClearMemoryClick = onClearMemoryClick
+                        )
+                        SettingsCategory.PROFILE_CONTACTS -> ProfileAndContactsCategory(
+                            state = state,
+                            onUserNameChange = onUserNameChange,
+                            onAddPrimeContact = onAddPrimeContact,
+                            onDeletePrimeContact = onDeletePrimeContact
+                        )
+                        SettingsCategory.SYSTEM_PERMISSIONS -> SystemPermissionsCategory(
+                            state = state,
+                            onRequestRuntimePermission = onRequestRuntimePermission,
+                            onOpenWriteSettingsClick = onOpenWriteSettingsClick,
+                            onOpenAccessibilityClick = onOpenAccessibilityClick,
+                            onOpenOverlayClick = onOpenOverlayClick,
+                            onOpenNotificationAccessClick = onOpenNotificationAccessClick
+                        )
+                        SettingsCategory.APP_UPDATES -> AppUpdatesCategory(
+                            state = state,
+                            onCheckUpdatesClick = onCheckUpdatesClick
+                        )
                     }
                 }
             }
@@ -255,13 +255,13 @@ private fun SettingsTopBar(
             Icon(
                 imageVector = if (isSubScreen) Icons.AutoMirrored.Rounded.ArrowBack else Icons.Rounded.Close,
                 contentDescription = if (isSubScreen) "Back to categories" else "Close settings",
-                tint = MyraCrimson
+                tint = MyraColors.Crimson
             )
         }
         Spacer(modifier = Modifier.width(8.dp))
         Text(
             text = title.uppercase(),
-            color = MyraCrimson,
+            color = MyraColors.Crimson,
             fontSize = 17.sp,
             fontWeight = FontWeight.Bold,
             letterSpacing = 2.sp,
@@ -283,6 +283,18 @@ private fun SettingsCategoryHub(
         ?.substringBefore(" (")
         ?: "Gemini Live"
 
+    val grantedCount = listOf(
+        state.isMicGranted,
+        state.isCameraGranted,
+        state.isContactsGranted,
+        state.isCallPhoneGranted,
+        state.isLocationGranted,
+        state.isWriteSettingsGranted,
+        state.isOverlayEnabled,
+        state.isAccessibilityEnabled,
+        state.isNotificationAccessEnabled
+    ).count { it }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 8.dp),
@@ -293,16 +305,17 @@ private fun SettingsCategoryHub(
                 icon = Icons.Rounded.Key,
                 title = SettingsCategory.API_CONNECTION.title,
                 subtitle = if (state.apiKey.isNotBlank()) "API key configured • Tap to edit or test" else "API key missing • Tap to add",
-                accentColor = if (state.apiKey.isNotBlank()) MyraSuccess else MyraCrimson,
+                accentColor = if (state.apiKey.isNotBlank()) MyraColors.Emerald else MyraColors.Crimson,
                 testTag = "category_api",
                 onClick = { onSelectCategory(SettingsCategory.API_CONNECTION) }
             )
         }
         item {
+            val wakeLabel = if (state.wakeWordEnabled) "Hey MYRA On" else "Wake Word Off"
             CategoryTile(
                 icon = Icons.Rounded.GraphicEq,
                 title = SettingsCategory.VOICE_MODEL.title,
-                subtitle = "$activeModelLabel • Voice: ${state.selectedVoice}",
+                subtitle = "$activeModelLabel • ${state.selectedVoice} • $wakeLabel",
                 testTag = "category_voice_model",
                 onClick = { onSelectCategory(SettingsCategory.VOICE_MODEL) }
             )
@@ -311,7 +324,7 @@ private fun SettingsCategoryHub(
             CategoryTile(
                 icon = Icons.Rounded.Translate,
                 title = SettingsCategory.LANGUAGE_PERSONALITY.title,
-                subtitle = "${state.languageMode} • ${state.personalityMode} Mode",
+                subtitle = "${state.languageMode} • ${state.personalityMode} • Theme: ${state.themeMode}",
                 testTag = "category_language_personality",
                 onClick = { onSelectCategory(SettingsCategory.LANGUAGE_PERSONALITY) }
             )
@@ -330,8 +343,8 @@ private fun SettingsCategoryHub(
             CategoryTile(
                 icon = Icons.Rounded.AccessibilityNew,
                 title = SettingsCategory.SYSTEM_PERMISSIONS.title,
-                subtitle = if (state.isAccessibilityEnabled) "Accessibility: Active" else "Accessibility: Disabled • Tap to enable",
-                accentColor = if (state.isAccessibilityEnabled) MyraSuccess else MyraCrimson,
+                subtitle = "$grantedCount of 9 permissions enabled • Manage access",
+                accentColor = if (state.isMicGranted && state.isAccessibilityEnabled) MyraColors.Emerald else MyraColors.Crimson,
                 testTag = "category_permissions",
                 onClick = { onSelectCategory(SettingsCategory.SYSTEM_PERMISSIONS) }
             )
@@ -364,19 +377,20 @@ private fun CategoryTile(
     icon: ImageVector,
     title: String,
     subtitle: String,
-    accentColor: Color = MyraCrimson,
+    accentColor: Color = MyraColors.Crimson,
     testTag: String,
     onClick: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(18.dp))
             .clickable(onClick = onClick)
             .testTag(testTag),
-        color = MyraSurface,
+        color = palette.surfaceCard,
         shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, Color(0x22FF1744))
+        border = BorderStroke(1.dp, MyraColors.Crimson.copy(alpha = 0.16f))
     ) {
         Row(
             modifier = Modifier
@@ -402,14 +416,14 @@ private fun CategoryTile(
             Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
-                    color = MyraTextPrimary,
+                    color = palette.textPrimary,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold
                 )
                 Spacer(modifier = Modifier.height(3.dp))
                 Text(
                     text = subtitle,
-                    color = MyraTextSecondary,
+                    color = palette.textSecondary,
                     fontSize = 12.5.sp,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
@@ -418,7 +432,7 @@ private fun CategoryTile(
             Icon(
                 imageVector = Icons.AutoMirrored.Rounded.KeyboardArrowRight,
                 contentDescription = "Open $title",
-                tint = MyraTextSecondary
+                tint = palette.textSecondary
             )
         }
     }
@@ -430,6 +444,7 @@ private fun ApiConnectionCategory(
     onApiKeyChange: (String) -> Unit,
     onTestApiClick: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     var showKey by remember { mutableStateOf(false) }
 
     LazyColumn(
@@ -445,7 +460,7 @@ private fun ApiConnectionCategory(
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("api_key_input"),
-                    placeholder = { Text("Enter Gemini API Key", color = Color(0xFF666677)) },
+                    placeholder = { Text("Enter Gemini API Key", color = palette.textMuted) },
                     singleLine = true,
                     visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
                     trailingIcon = {
@@ -456,7 +471,7 @@ private fun ApiConnectionCategory(
                             Icon(
                                 imageVector = if (showKey) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
                                 contentDescription = if (showKey) "Hide API Key" else "Show API Key",
-                                tint = MyraTextSecondary
+                                tint = palette.textSecondary
                             )
                         }
                     },
@@ -473,7 +488,7 @@ private fun ApiConnectionCategory(
                         .fillMaxWidth()
                         .height(48.dp)
                         .testTag("test_api_button"),
-                    colors = ButtonDefaults.buttonColors(containerColor = MyraCrimson),
+                    colors = ButtonDefaults.buttonColors(containerColor = MyraColors.Crimson),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Text(
@@ -487,7 +502,7 @@ private fun ApiConnectionCategory(
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
                     text = "Only verified Gemini API keys allow MYRA voice conversations to start.",
-                    color = MyraTextSecondary,
+                    color = palette.textSecondary,
                     fontSize = 12.sp
                 )
             }
@@ -499,13 +514,65 @@ private fun ApiConnectionCategory(
 private fun VoiceAndModelCategory(
     state: SettingsUiState,
     onModelSelected: (String) -> Unit,
-    onVoiceSelected: (String) -> Unit
+    onVoiceSelected: (String) -> Unit,
+    onResponseStyleSelected: (String) -> Unit,
+    onWakeWordToggle: (Boolean) -> Unit
 ) {
+    val palette = LocalMyraPalette.current
+    val responseStyles = listOf(
+        "Concise" to "Concise (Fast 1–2 sentence answers)",
+        "Detailed" to "Detailed (Thorough explanations)"
+    )
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        item {
+            SettingsSectionCard(title = "HEY MYRA WAKE WORD") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            text = "Hands-Free \"Hey MYRA\" Detection",
+                            color = palette.textPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Listens while app is open and idle so saying \"Hey MYRA\" wakes voice mode automatically.",
+                            color = palette.textSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = state.wakeWordEnabled,
+                        onCheckedChange = onWakeWordToggle,
+                        modifier = Modifier.testTag("wake_word_switch"),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = MyraColors.Crimson
+                        )
+                    )
+                }
+            }
+        }
+        item {
+            SettingsSectionCard(title = "VOICE RESPONSE STYLE") {
+                responseStyles.forEach { (key, label) ->
+                    RadioOptionRow(
+                        label = label,
+                        selected = state.voiceResponseStyle == key,
+                        onClick = { onResponseStyleSelected(key) }
+                    )
+                }
+            }
+        }
         item {
             SettingsSectionCard(title = "AI LIVE MODEL") {
                 state.modelOptions.forEach { (label, id) ->
@@ -535,8 +602,12 @@ private fun VoiceAndModelCategory(
 private fun LanguageAndPersonalityCategory(
     state: SettingsUiState,
     onLanguageSelected: (String) -> Unit,
-    onPersonalitySelected: (String) -> Unit
+    onPersonalitySelected: (String) -> Unit,
+    onThemeModeSelected: (String) -> Unit,
+    onMemoryConsentToggle: (Boolean) -> Unit,
+    onClearMemoryClick: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     val languages = listOf(
         "Banglish" to "Banglish (বাংলা + English)",
         "Bangla" to "Bangla (বাংলা)",
@@ -548,12 +619,28 @@ private fun LanguageAndPersonalityCategory(
         "Professional" to "Professional Mode (Formal)",
         "Assistant" to "Assistant Mode (Friendly & Balanced)"
     )
+    val themes = listOf(
+        "DARK" to "Futuristic Dark (Obsidian + Neon Crimson)",
+        "LIGHT" to "Clean Light (Pearl + Neon Crimson)",
+        "SYSTEM" to "Follow Android System Theme"
+    )
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        item {
+            SettingsSectionCard(title = "APP THEME") {
+                themes.forEach { (key, label) ->
+                    RadioOptionRow(
+                        label = label,
+                        selected = state.themeMode.equals(key, ignoreCase = true),
+                        onClick = { onThemeModeSelected(key) }
+                    )
+                }
+            }
+        }
         item {
             SettingsSectionCard(title = "LANGUAGE / ভাষা") {
                 languages.forEach { (key, label) ->
@@ -576,6 +663,56 @@ private fun LanguageAndPersonalityCategory(
                 }
             }
         }
+        item {
+            SettingsSectionCard(title = "USER PREFERENCE MEMORY (CONSENT)") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                        Text(
+                            text = "Remember My Preferences",
+                            color = palette.textPrimary,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "Allows MYRA to save preferences locally when you say \"Remember that...\".",
+                            color = palette.textSecondary,
+                            fontSize = 12.sp
+                        )
+                    }
+                    Switch(
+                        checked = state.memoryConsentEnabled,
+                        onCheckedChange = onMemoryConsentToggle,
+                        modifier = Modifier.testTag("memory_consent_switch"),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = MyraColors.Crimson
+                        )
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = onClearMemoryClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("clear_memory_button"),
+                    border = BorderStroke(1.dp, MyraColors.Crimson),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(
+                        text = "CLEAR REMEMBERED PREFERENCES",
+                        color = MyraColors.Crimson,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -586,6 +723,7 @@ private fun ProfileAndContactsCategory(
     onAddPrimeContact: (String, String) -> Unit,
     onDeletePrimeContact: (Int) -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     var showAddDialog by remember { mutableStateOf(false) }
 
     if (showAddDialog) {
@@ -611,7 +749,7 @@ private fun ProfileAndContactsCategory(
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("user_name_input"),
-                    placeholder = { Text("Your Name (e.g. Alex)", color = Color(0xFF666677)) },
+                    placeholder = { Text("Your Name (e.g. Alex)", color = palette.textMuted) },
                     singleLine = true,
                     colors = myraFieldColors(),
                     shape = RoundedCornerShape(14.dp)
@@ -627,7 +765,7 @@ private fun ProfileAndContactsCategory(
                 ) {
                     Text(
                         text = "${state.primeContacts.size} saved contact(s)",
-                        color = MyraTextSecondary,
+                        color = palette.textSecondary,
                         fontSize = 13.sp
                     )
                     Button(
@@ -635,7 +773,7 @@ private fun ProfileAndContactsCategory(
                         modifier = Modifier
                             .height(48.dp)
                             .testTag("add_prime_contact_button"),
-                        colors = ButtonDefaults.buttonColors(containerColor = MyraCrimson),
+                        colors = ButtonDefaults.buttonColors(containerColor = MyraColors.Crimson),
                         shape = RoundedCornerShape(12.dp)
                     ) {
                         Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -649,7 +787,7 @@ private fun ProfileAndContactsCategory(
                 if (state.primeContacts.isEmpty()) {
                     Text(
                         text = "No Prime Contacts added yet.",
-                        color = MyraTextSecondary,
+                        color = palette.textSecondary,
                         fontSize = 13.sp,
                         modifier = Modifier.padding(vertical = 8.dp)
                     )
@@ -659,7 +797,7 @@ private fun ProfileAndContactsCategory(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(vertical = 4.dp),
-                            color = MyraSurfaceAlt,
+                            color = palette.surfaceAlt,
                             shape = RoundedCornerShape(12.dp)
                         ) {
                             Row(
@@ -671,13 +809,13 @@ private fun ProfileAndContactsCategory(
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
                                         text = contact.name.ifBlank { "Prime Contact" },
-                                        color = MyraTextPrimary,
+                                        color = palette.textPrimary,
                                         fontWeight = FontWeight.Medium,
                                         fontSize = 14.sp
                                     )
                                     Text(
                                         text = contact.number,
-                                        color = MyraTextSecondary,
+                                        color = palette.textSecondary,
                                         fontSize = 12.sp
                                     )
                                 }
@@ -688,7 +826,7 @@ private fun ProfileAndContactsCategory(
                                     Icon(
                                         imageVector = Icons.Rounded.DeleteOutline,
                                         contentDescription = "Remove contact",
-                                        tint = MyraCrimson
+                                        tint = MyraColors.Crimson
                                     )
                                 }
                             }
@@ -703,74 +841,186 @@ private fun ProfileAndContactsCategory(
 @Composable
 private fun SystemPermissionsCategory(
     state: SettingsUiState,
+    onRequestRuntimePermission: (String) -> Unit,
+    onOpenWriteSettingsClick: () -> Unit,
     onOpenAccessibilityClick: () -> Unit,
-    onOpenOverlayClick: () -> Unit
+    onOpenOverlayClick: () -> Unit,
+    onOpenNotificationAccessClick: () -> Unit
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         item {
-            SettingsSectionCard(title = "FLOATING SIRI ORB (DISPLAY OVER APPS)") {
-                Text(
-                    text = if (state.isOverlayEnabled) "Status: ACTIVE" else "Status: DISABLED",
-                    color = if (state.isOverlayEnabled) MyraSuccess else MyraCrimson,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Allows MYRA's glowing JARVIS/Siri orb to float on screen when you exit the app while AI is running.",
-                    color = MyraTextSecondary,
-                    fontSize = 13.sp
-                )
-                Spacer(modifier = Modifier.height(14.dp))
-                OutlinedButton(
-                    onClick = onOpenOverlayClick,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("open_overlay_permission_button"),
-                    border = BorderStroke(1.dp, MyraCrimson),
-                    shape = RoundedCornerShape(14.dp)
-                ) {
-                    Text(
-                        text = if (state.isOverlayEnabled) "MANAGE OVERLAY PERMISSION" else "ENABLE FLOATING ORB",
-                        color = MyraCrimson,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-            }
+            PermissionStatusCard(
+                title = "MICROPHONE ACCESS",
+                description = "Required for live AI voice conversations and optional \"Hey MYRA\" wake word.",
+                isGranted = state.isMicGranted,
+                buttonLabel = if (state.isMicGranted) "MANAGE IN SETTINGS" else "GRANT MICROPHONE",
+                testTag = "perm_mic_button",
+                onClick = { onRequestRuntimePermission(Manifest.permission.RECORD_AUDIO) }
+            )
         }
         item {
-            SettingsSectionCard(title = "ACCESSIBILITY SERVICE") {
+            PermissionStatusCard(
+                title = "CAMERA ACCESS",
+                description = "Allows MYRA to open your front/back camera or take photos on voice command.",
+                isGranted = state.isCameraGranted,
+                buttonLabel = if (state.isCameraGranted) "MANAGE IN SETTINGS" else "GRANT CAMERA",
+                testTag = "perm_camera_button",
+                onClick = { onRequestRuntimePermission(Manifest.permission.CAMERA) }
+            )
+        }
+        item {
+            PermissionStatusCard(
+                title = "CONTACTS ACCESS",
+                description = "Lets MYRA look up contact numbers for confirmed calls, SMS, and WhatsApp messages.",
+                isGranted = state.isContactsGranted,
+                buttonLabel = if (state.isContactsGranted) "MANAGE IN SETTINGS" else "GRANT CONTACTS",
+                testTag = "perm_contacts_button",
+                onClick = { onRequestRuntimePermission(Manifest.permission.READ_CONTACTS) }
+            )
+        }
+        item {
+            PermissionStatusCard(
+                title = "PHONE CALLS",
+                description = "Allows placing calls after you explicitly confirm the recipient.",
+                isGranted = state.isCallPhoneGranted,
+                buttonLabel = if (state.isCallPhoneGranted) "MANAGE IN SETTINGS" else "GRANT CALL PHONE",
+                testTag = "perm_call_button",
+                onClick = { onRequestRuntimePermission(Manifest.permission.CALL_PHONE) }
+            )
+        }
+        item {
+            PermissionStatusCard(
+                title = "LOCATION (COARSE)",
+                description = "Provides city-level weather updates and current location info when requested.",
+                isGranted = state.isLocationGranted,
+                buttonLabel = if (state.isLocationGranted) "MANAGE IN SETTINGS" else "GRANT LOCATION",
+                testTag = "perm_location_button",
+                onClick = { onRequestRuntimePermission(Manifest.permission.ACCESS_COARSE_LOCATION) }
+            )
+        }
+        item {
+            PermissionStatusCard(
+                title = "SCREEN BRIGHTNESS (WRITE SETTINGS)",
+                description = "Lets MYRA increase or decrease screen brightness on your command.",
+                isGranted = state.isWriteSettingsGranted,
+                buttonLabel = if (state.isWriteSettingsGranted) "MANAGE BRIGHTNESS ACCESS" else "ALLOW MODIFY SETTINGS",
+                testTag = "perm_write_settings_button",
+                onClick = onOpenWriteSettingsClick
+            )
+        }
+        item {
+            PermissionStatusCard(
+                title = "FLOATING SIRI ORB (DISPLAY OVER APPS)",
+                description = "Displays MYRA's glowing orb on screen when you exit the app during an active session.",
+                isGranted = state.isOverlayEnabled,
+                buttonLabel = if (state.isOverlayEnabled) "MANAGE OVERLAY PERMISSION" else "ENABLE FLOATING ORB",
+                testTag = "open_overlay_permission_button",
+                onClick = onOpenOverlayClick
+            )
+        }
+        item {
+            PermissionStatusCard(
+                title = "ACCESSIBILITY SERVICE (OPTIONAL)",
+                description = "Enables hands-free closing of apps and system screenshots (API 28+) with explicit disclosure.",
+                isGranted = state.isAccessibilityEnabled,
+                buttonLabel = if (state.isAccessibilityEnabled) "MANAGE ACCESSIBILITY" else "ENABLE ACCESSIBILITY SERVICE",
+                testTag = "open_accessibility_button",
+                onClick = onOpenAccessibilityClick
+            )
+        }
+        item {
+            PermissionStatusCard(
+                title = "NOTIFICATION READER (EXPLICIT CONSENT)",
+                description = "Allows MYRA to read your recent notifications aloud only when you ask.",
+                isGranted = state.isNotificationAccessEnabled,
+                buttonLabel = if (state.isNotificationAccessEnabled) "MANAGE NOTIFICATION ACCESS" else "ENABLE NOTIFICATION ACCESS",
+                testTag = "open_notification_access_button",
+                onClick = onOpenNotificationAccessClick
+            )
+        }
+    }
+}
+
+@Composable
+private fun PermissionStatusCard(
+    title: String,
+    description: String,
+    isGranted: Boolean,
+    buttonLabel: String,
+    testTag: String,
+    onClick: () -> Unit
+) {
+    val palette = LocalMyraPalette.current
+    SettingsSectionCard(title = title) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = if (isGranted) "Status: ALLOWED ✓" else "Status: NOT GRANTED",
+                color = if (isGranted) MyraColors.Emerald else MyraColors.Crimson,
+                fontWeight = FontWeight.Bold,
+                fontSize = 13.5.sp
+            )
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = description,
+            color = palette.textSecondary,
+            fontSize = 12.5.sp
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+        if (isGranted) {
+            OutlinedButton(
+                onClick = onClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag(testTag),
+                border = BorderStroke(1.dp, MyraColors.Emerald.copy(alpha = 0.5f)),
+                colors = ButtonDefaults.outlinedButtonColors(containerColor = MyraColors.Emerald.copy(alpha = 0.12f)),
+                shape = RoundedCornerShape(14.dp)
+            ) {
                 Text(
-                    text = if (state.isAccessibilityEnabled) "Status: ACTIVE" else "Status: DISABLED",
-                    color = if (state.isAccessibilityEnabled) MyraSuccess else MyraCrimson,
+                    text = "ALLOWED (TAP TO MANAGE)",
+                    color = MyraColors.Emerald,
                     fontWeight = FontWeight.Bold,
-                    fontSize = 14.sp
-                )
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = "Enable MYRA Accessibility Helper in Android Settings to perform hands-free voice actions across apps.",
-                    color = MyraTextSecondary,
                     fontSize = 13.sp
                 )
-                Spacer(modifier = Modifier.height(14.dp))
-                OutlinedButton(
-                    onClick = onOpenAccessibilityClick,
+            }
+        } else {
+            Button(
+                onClick = onClick,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .testTag(testTag),
+                colors = ButtonDefaults.buttonColors(containerColor = Color.Transparent),
+                shape = RoundedCornerShape(14.dp),
+                contentPadding = PaddingValues(0.dp)
+            ) {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                        .testTag("open_accessibility_button"),
-                    border = BorderStroke(1.dp, MyraCrimson),
-                    shape = RoundedCornerShape(14.dp)
+                        .fillMaxSize()
+                        .background(
+                            Brush.horizontalGradient(
+                                colors = listOf(MyraColors.Crimson, Color(0xFFD5004C))
+                            ),
+                            shape = RoundedCornerShape(14.dp)
+                        ),
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "OPEN ACCESSIBILITY SETTINGS",
-                        color = MyraCrimson,
-                        fontWeight = FontWeight.Bold
+                        text = buttonLabel,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.5.sp,
+                        letterSpacing = 1.1.sp
                     )
                 }
             }
@@ -783,6 +1033,7 @@ private fun AppUpdatesCategory(
     state: SettingsUiState,
     onCheckUpdatesClick: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
@@ -797,13 +1048,13 @@ private fun AppUpdatesCategory(
                 ) {
                     Text(
                         text = "Installed Version",
-                        color = MyraTextPrimary,
+                        color = palette.textPrimary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Medium
                     )
                     Text(
                         text = "v${state.appVersion}",
-                        color = MyraCrimson,
+                        color = MyraColors.Crimson,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -811,7 +1062,7 @@ private fun AppUpdatesCategory(
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     text = state.updateServiceStatus,
-                    color = MyraTextSecondary,
+                    color = palette.textSecondary,
                     fontSize = 12.5.sp
                 )
                 Spacer(modifier = Modifier.height(16.dp))
@@ -822,13 +1073,13 @@ private fun AppUpdatesCategory(
                         .fillMaxWidth()
                         .height(48.dp)
                         .testTag("check_updates_button"),
-                    colors = ButtonDefaults.buttonColors(containerColor = MyraSurfaceAlt),
-                    border = BorderStroke(1.dp, MyraCrimson),
+                    colors = ButtonDefaults.buttonColors(containerColor = palette.surfaceAlt),
+                    border = BorderStroke(1.dp, MyraColors.Crimson),
                     shape = RoundedCornerShape(14.dp)
                 ) {
                     Text(
                         text = state.updateButtonLabel,
-                        color = MyraCrimson,
+                        color = MyraColors.Crimson,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -842,11 +1093,12 @@ private fun SettingsSectionCard(
     title: String,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     Surface(
         modifier = Modifier.fillMaxWidth(),
-        color = MyraSurface,
+        color = palette.surfaceCard,
         shape = RoundedCornerShape(18.dp),
-        border = BorderStroke(1.dp, Color(0x1FFF1744))
+        border = BorderStroke(1.dp, MyraColors.Crimson.copy(alpha = 0.14f))
     ) {
         Column(
             modifier = Modifier
@@ -855,7 +1107,7 @@ private fun SettingsSectionCard(
         ) {
             Text(
                 text = title,
-                color = MyraCrimson,
+                color = MyraColors.Crimson,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 1.4.sp
@@ -872,6 +1124,7 @@ private fun RadioOptionRow(
     selected: Boolean,
     onClick: () -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -884,14 +1137,14 @@ private fun RadioOptionRow(
             selected = selected,
             onClick = onClick,
             colors = RadioButtonDefaults.colors(
-                selectedColor = MyraCrimson,
-                unselectedColor = MyraTextSecondary
+                selectedColor = MyraColors.Crimson,
+                unselectedColor = palette.textSecondary
             )
         )
         Spacer(modifier = Modifier.width(6.dp))
         Text(
             text = label,
-            color = if (selected) MyraTextPrimary else MyraTextSecondary,
+            color = if (selected) palette.textPrimary else palette.textSecondary,
             fontSize = 14.sp,
             fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal
         )
@@ -910,7 +1163,7 @@ private fun GradientPrimaryButton(
             .clip(RoundedCornerShape(24.dp))
             .background(
                 Brush.horizontalGradient(
-                    colors = listOf(MyraCrimson, MyraViolet)
+                    colors = listOf(MyraColors.Crimson, MyraColors.Violet)
                 )
             )
             .clickable(onClick = onClick),
@@ -931,13 +1184,14 @@ private fun AddPrimeContactDialog(
     onDismiss: () -> Unit,
     onAdd: (String, String) -> Unit
 ) {
+    val palette = LocalMyraPalette.current
     var name by remember { mutableStateOf("") }
     var number by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        containerColor = MyraSurface,
-        title = { Text("Add Prime Contact", color = MyraTextPrimary) },
+        containerColor = palette.surfaceCard,
+        title = { Text("Add Prime Contact", color = palette.textPrimary) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 OutlinedTextField(
@@ -966,24 +1220,27 @@ private fun AddPrimeContactDialog(
                     }
                 }
             ) {
-                Text("ADD", color = MyraCrimson, fontWeight = FontWeight.Bold)
+                Text("ADD", color = MyraColors.Crimson, fontWeight = FontWeight.Bold)
             }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) {
-                Text("CANCEL", color = MyraTextSecondary)
+                Text("CANCEL", color = palette.textSecondary)
             }
         }
     )
 }
 
 @Composable
-private fun myraFieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedBorderColor = MyraCrimson,
-    unfocusedBorderColor = Color(0xFF2B2B3A),
-    focusedTextColor = MyraTextPrimary,
-    unfocusedTextColor = MyraTextPrimary,
-    cursorColor = MyraCrimson,
-    focusedLabelColor = MyraCrimson,
-    unfocusedLabelColor = MyraTextSecondary
-)
+private fun myraFieldColors(): androidx.compose.material3.TextFieldColors {
+    val palette = LocalMyraPalette.current
+    return OutlinedTextFieldDefaults.colors(
+        focusedBorderColor = MyraColors.Crimson,
+        unfocusedBorderColor = palette.borderSubtle,
+        focusedTextColor = palette.textPrimary,
+        unfocusedTextColor = palette.textPrimary,
+        cursorColor = MyraColors.Crimson,
+        focusedLabelColor = MyraColors.Crimson,
+        unfocusedLabelColor = palette.textSecondary
+    )
+}
