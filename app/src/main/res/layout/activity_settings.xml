@@ -427,7 +427,7 @@
                         android:layout_height="wrap_content"
                         android:layout_alignParentEnd="true"
                         android:layout_centerVertical="true"
-                        android:text="v0.1"
+                        android:text="v0.2"
                         android:textColor="#AAAAAA"
                         android:textSize="12sp" />
                 </RelativeLayout>

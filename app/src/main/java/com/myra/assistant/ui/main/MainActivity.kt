@@ -152,8 +152,8 @@ class MainActivity : AppCompatActivity() {
         val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
         val lastCheck = prefs.getLong("last_update_check_ms", 0L)
-        // Throttle automatic launch checks to once every 6 hours
-        if (now - lastCheck < 6 * 60 * 60 * 1000L) return
+        // Short 1-minute cooldown so fresh app launches detect new GitHub releases immediately
+        if (now - lastCheck < 60 * 1000L) return
         prefs.edit().putLong("last_update_check_ms", now).apply()
 
         GitHubUpdateChecker.checkLatestRelease(this) { result ->
