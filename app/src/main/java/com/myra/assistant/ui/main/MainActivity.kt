@@ -35,6 +35,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.myra.assistant.BuildConfig
+import com.myra.assistant.service.AccessibilityHelperService
 import com.myra.assistant.service.CallMonitorService
 import com.myra.assistant.service.MyraOverlayService
 import com.myra.assistant.service.MyraVoiceService
@@ -152,9 +153,33 @@ class MainActivity : AppCompatActivity() {
                         interruptMyra()
                     },
                     onOrbClick = {
-                        if (!MyraVoiceSession.isRunning.value) {
+                        if (MyraVoiceSession.isRunning.value) {
+                            stopAiAssistant()
+                        } else {
                             startAiAssistant()
                         }
+                    },
+                    onSendMessage = { text ->
+                        sendTypedMessageToMyra(text)
+                    },
+                    onExecuteQuickCommand = { cmd ->
+                        viewModel.executeCommand(cmd)
+                    },
+                    onCheckUpdatesClick = {
+                        checkForUpdatesManually()
+                    },
+                    onOpenOverlaySettings = {
+                        navigatingToSettings = true
+                        startActivity(
+                            Intent(
+                                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                Uri.parse("package:$packageName")
+                            )
+                        )
+                    },
+                    onOpenAccessibilitySettings = {
+                        navigatingToSettings = true
+                        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     },
                     onSettingsClick = {
                         navigatingToSettings = true
@@ -177,6 +202,7 @@ class MainActivity : AppCompatActivity() {
         viewModel.commandResult.observe(this) { result ->
             if (!result.isNullOrEmpty()) {
                 MyraVoiceSession.addMyraMessage(result)
+                Toast.makeText(this, result, Toast.LENGTH_SHORT).show()
                 if (MyraVoiceSession.isRunning.value) {
                     sendServiceAction(MyraVoiceService.ACTION_SEND_TEXT) {
                         putExtra(MyraVoiceService.EXTRA_TEXT, result)
@@ -219,6 +245,33 @@ class MainActivity : AppCompatActivity() {
                         release = release,
                         isMandatory = outcome.isMandatory
                     )
+                }
+            }
+        }
+    }
+
+    private fun checkForUpdatesManually() {
+        Toast.makeText(this, "Checking for updates...", Toast.LENGTH_SHORT).show()
+        RemoteConfigUpdateManager.checkForUpdates(this, forceRefresh = true) { outcome ->
+            runOnUiThread {
+                when (val result = outcome.checkResult) {
+                    is GitHubUpdateChecker.CheckResult.UpdateAvailable -> {
+                        UpdateDialogHelper.showUpdateDialog(
+                            activity = this@MainActivity,
+                            release = result.release,
+                            isMandatory = outcome.isMandatory
+                        )
+                    }
+                    is GitHubUpdateChecker.CheckResult.UpToDate -> {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "MYRA v${result.currentVersion} is up to date",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                    is GitHubUpdateChecker.CheckResult.Error -> {
+                        Toast.makeText(this@MainActivity, result.message, Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         }
@@ -289,7 +342,7 @@ class MainActivity : AppCompatActivity() {
         return if (apiKey == "MY_GEMINI_API_KEY") "" else apiKey
     }
 
-    private fun startAiAssistant() {
+    private fun requireApiKeyAndMic(): Boolean {
         val apiKey = getEffectiveApiKey()
         if (apiKey.isEmpty()) {
             MyraVoiceSession.setRunning(false)
@@ -300,17 +353,34 @@ class MainActivity : AppCompatActivity() {
                 .setTitle("Gemini API Key Required 🔑")
                 .setMessage("Please add your Gemini API Key in Settings before starting MYRA.")
                 .setPositiveButton("OPEN SETTINGS") { _, _ ->
+                    navigatingToSettings = true
                     startActivity(Intent(this, SettingsActivity::class.java))
                 }
                 .setNegativeButton("CANCEL", null)
                 .show()
-            return
+            return false
         }
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             checkAndRequestPermissions(autoStart = true)
-            return
+            return false
         }
+
+        return true
+    }
+
+    private fun sendTypedMessageToMyra(text: String) {
+        if (!requireApiKeyAndMic()) return
+        val intent = Intent(this, MyraVoiceService::class.java).apply {
+            action = MyraVoiceService.ACTION_SEND_TEXT
+            putExtra(MyraVoiceService.EXTRA_TEXT, text)
+            putExtra(MyraVoiceService.EXTRA_ADD_TO_CHAT, true)
+        }
+        ContextCompat.startForegroundService(this, intent)
+    }
+
+    private fun startAiAssistant() {
+        if (!requireApiKeyAndMic()) return
 
         val intent = Intent(this, MyraVoiceService::class.java).apply {
             action = MyraVoiceService.ACTION_START
@@ -329,6 +399,7 @@ class MainActivity : AppCompatActivity() {
                 .setTitle("Enable Floating Siri Orb ✨")
                 .setMessage("Allow MYRA to display over other apps so the glowing JARVIS/Siri orb appears on screen when you exit the app.")
                 .setPositiveButton("ENABLE") { _, _ ->
+                    navigatingToSettings = true
                     val overlayIntent = Intent(
                         Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                         Uri.parse("package:$packageName")
@@ -456,17 +527,21 @@ class MainActivity : AppCompatActivity() {
         val timeStr = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
 
         val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+        val userName = prefs.getString("user_name", "Alex") ?: "Alex"
         val personality = prefs.getString("personality_mode", "GF") ?: "GF"
         val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
         val voice = prefs.getString("gemini_voice", "Aoede") ?: "Aoede"
 
         telemetryState.value = HomeTelemetryState(
+            userName = userName,
             batteryPercent = batLevel,
             ramPercent = ramPercent,
             timeText = timeStr,
             personalityLabel = personality,
             languageLabel = language,
-            voiceLabel = voice
+            voiceLabel = voice,
+            isOverlayEnabled = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this),
+            isAccessibilityEnabled = AccessibilityHelperService.isEnabled(this)
         )
     }
 

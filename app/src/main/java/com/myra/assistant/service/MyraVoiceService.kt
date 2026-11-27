@@ -45,6 +45,7 @@ class MyraVoiceService : Service() {
         const val ACTION_SET_IN_CALL_MODE = "com.myra.assistant.action.SET_IN_CALL_MODE"
 
         const val EXTRA_TEXT = "extra_text"
+        const val EXTRA_ADD_TO_CHAT = "extra_add_to_chat"
         const val EXTRA_IN_CALL_MODE = "extra_in_call_mode"
     }
 
@@ -62,6 +63,7 @@ class MyraVoiceService : Service() {
     @Volatile private var isMuted = true
     @Volatile private var isInCallMode = false
     @Volatile private var hasGreetedThisSession = false
+    @Volatile private var pendingTextToSend: String? = null
     private var lastConfigSignature: String? = null
     private var lastAmplitudeEmitMs: Long = 0L
 
@@ -86,9 +88,10 @@ class MyraVoiceService : Service() {
             ACTION_TOGGLE_MUTE -> toggleMute()
             ACTION_INTERRUPT -> interruptMyra()
             ACTION_SEND_TEXT -> {
-                val text = intent.getStringExtra(EXTRA_TEXT)
+                val text = intent.getStringExtra(EXTRA_TEXT)?.trim()
+                val addToChat = intent.getBooleanExtra(EXTRA_ADD_TO_CHAT, false)
                 if (!text.isNullOrBlank()) {
-                    geminiLive?.sendText(text)
+                    handleUserOrSystemText(text, addToChat)
                 }
             }
             ACTION_SET_IN_CALL_MODE -> {
@@ -117,15 +120,45 @@ class MyraVoiceService : Service() {
         return START_STICKY
     }
 
-    private fun startVoiceSession() {
+    private fun handleUserOrSystemText(text: String, addToChat: Boolean) {
+        if (addToChat) {
+            MyraVoiceSession.addUserMessage(text)
+            val cmd = CommandParser.parse(text)
+            if (cmd != null) {
+                serviceScope.launch {
+                    val result = commandExecutor.executeCommand(cmd)
+                    if (!result.isNullOrEmpty()) {
+                        MyraVoiceSession.addMyraMessage(result)
+                        if (geminiLive?.isSessionReady == true) {
+                            geminiLive?.sendText(result)
+                        }
+                    }
+                }
+                return
+            }
+        }
+
+        if (!isAiRunning) {
+            pendingTextToSend = text
+            startVoiceSession(skipGreeting = true)
+        } else if (geminiLive?.isSessionReady == true) {
+            geminiLive?.sendText(text)
+        } else {
+            pendingTextToSend = text
+        }
+    }
+
+    private fun startVoiceSession(skipGreeting: Boolean = false) {
         val apiKey = getEffectiveApiKey()
         if (apiKey.isEmpty()) {
+            pendingTextToSend = null
             MyraVoiceSession.emitError("Gemini API Key missing — add in Settings.")
             stopVoiceSession()
             return
         }
 
         if (ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            pendingTextToSend = null
             MyraVoiceSession.emitError("Microphone permission is required for MYRA.")
             stopVoiceSession()
             return
@@ -146,7 +179,7 @@ class MyraVoiceService : Service() {
 
         isAiRunning = true
         isMuted = false
-        hasGreetedThisSession = false
+        hasGreetedThisSession = skipGreeting
         acquireWakeLock()
 
         MyraVoiceSession.setRunning(true)
@@ -161,8 +194,14 @@ class MyraVoiceService : Service() {
         audioEngine?.startRecording()
 
         if (geminiLive?.isConnected == true && geminiLive?.isSessionReady == true) {
-            hasGreetedThisSession = true
-            sendGreeting()
+            val queued = pendingTextToSend
+            pendingTextToSend = null
+            if (!queued.isNullOrBlank()) {
+                geminiLive?.sendText(queued)
+            } else if (!hasGreetedThisSession) {
+                hasGreetedThisSession = true
+                sendGreeting()
+            }
         } else {
             geminiLive?.connect()
         }
@@ -248,7 +287,12 @@ class MyraVoiceService : Service() {
                         MyraVoiceSession.setOrbState(OrbAnimationView.State.LISTENING)
                         MyraVoiceSession.setStatusText("MYRA active — listening... 🎙️")
                         updateNotification("MYRA Active", "Listening in background")
-                        if (!hasGreetedThisSession) {
+                        val queued = pendingTextToSend
+                        pendingTextToSend = null
+                        if (!queued.isNullOrBlank()) {
+                            hasGreetedThisSession = true
+                            geminiLive?.sendText(queued)
+                        } else if (!hasGreetedThisSession) {
                             hasGreetedThisSession = true
                             sendGreeting()
                         }
