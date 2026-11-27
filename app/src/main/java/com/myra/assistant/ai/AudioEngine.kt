@@ -7,6 +7,10 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
+import android.os.Build
 import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -22,10 +26,10 @@ class AudioEngine(private val context: Context) {
         private const val MIC_SAMPLE_RATE = 16000
         private const val SPEAKER_SAMPLE_RATE = 24000
         private const val CHUNK_SIZE = 1024
-        private const val USER_SPEECH_RMS_THRESHOLD = 0.04f
-        private const val USER_SPEECH_END_MS = 650L
-        private const val AI_POST_SPEECH_COOLDOWN_MS = 450L
-        private const val CHUNK_GAP_GRACE_MS = 350L
+        private const val USER_SPEECH_RMS_THRESHOLD = 0.025f
+        private const val USER_SPEECH_END_MS = 240L
+        private const val AI_POST_SPEECH_COOLDOWN_MS = 180L
+        private const val CHUNK_GAP_GRACE_MS = 180L
     }
 
     @Volatile var isMuted: Boolean = false
@@ -46,6 +50,9 @@ class AudioEngine(private val context: Context) {
 
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
+    private var echoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
+    private var gainControl: AutomaticGainControl? = null
 
     private val playbackQueue = LinkedBlockingQueue<ByteArray>()
 
@@ -69,8 +76,8 @@ class AudioEngine(private val context: Context) {
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
             )
-            // Keep buffer compact for low-latency voice start
-            val bufferSize = maxOf(minBufferSize, SPEAKER_SAMPLE_RATE / 4)
+            // Compact buffer for immediate low-latency voice output
+            val bufferSize = maxOf(minBufferSize, SPEAKER_SAMPLE_RATE / 6)
 
             val attributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -83,13 +90,17 @@ class AudioEngine(private val context: Context) {
                 .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                 .build()
 
-            audioTrack = AudioTrack.Builder()
+            val builder = AudioTrack.Builder()
                 .setAudioAttributes(attributes)
                 .setAudioFormat(format)
                 .setBufferSizeInBytes(bufferSize)
                 .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
 
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            }
+
+            audioTrack = builder.build()
             audioTrack?.play()
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing AudioTrack: ${e.message}", e)
@@ -164,10 +175,13 @@ class AudioEngine(private val context: Context) {
                 return
             }
 
+            attachAudioEffects(audioRecord!!.audioSessionId)
+
             audioRecord?.startRecording()
             isRecording = true
 
             recordingThread = thread(name = "AudioRecordThread") {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
                 val buffer = ByteArray(CHUNK_SIZE)
                 while (isRecording) {
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
@@ -207,9 +221,56 @@ class AudioEngine(private val context: Context) {
         }
     }
 
+    private fun attachAudioEffects(sessionId: Int) {
+        releaseAudioEffects()
+        try {
+            if (AcousticEchoCanceler.isAvailable()) {
+                echoCanceler = AcousticEchoCanceler.create(sessionId)?.apply {
+                    enabled = true
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "AEC unavailable: ${e.message}")
+        }
+        try {
+            if (NoiseSuppressor.isAvailable()) {
+                noiseSuppressor = NoiseSuppressor.create(sessionId)?.apply {
+                    enabled = true
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "NoiseSuppressor unavailable: ${e.message}")
+        }
+        try {
+            if (AutomaticGainControl.isAvailable()) {
+                gainControl = AutomaticGainControl.create(sessionId)?.apply {
+                    enabled = true
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "AGC unavailable: ${e.message}")
+        }
+    }
+
+    private fun releaseAudioEffects() {
+        try {
+            echoCanceler?.release()
+        } catch (_: Exception) {}
+        echoCanceler = null
+        try {
+            noiseSuppressor?.release()
+        } catch (_: Exception) {}
+        noiseSuppressor = null
+        try {
+            gainControl?.release()
+        } catch (_: Exception) {}
+        gainControl = null
+    }
+
     fun stopRecording() {
         isRecording = false
         isUserSpeaking = false
+        releaseAudioEffects()
         try {
             audioRecord?.stop()
             audioRecord?.release()
@@ -224,19 +285,11 @@ class AudioEngine(private val context: Context) {
         isPlaying = true
 
         playbackThread = thread(name = "AudioPlaybackThread") {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
             while (isPlaying) {
                 try {
-                    val chunk = playbackQueue.poll(40, TimeUnit.MILLISECONDS)
+                    val chunk = playbackQueue.poll(30, TimeUnit.MILLISECONDS)
                     if (chunk != null) {
-                        // Do not talk over the user if user hasn't finished speaking yet
-                        if (!isSpeaking && isUserSpeaking) {
-                            var waitedMs = 0L
-                            while (isPlaying && isUserSpeaking && waitedMs < 2000L) {
-                                Thread.sleep(50)
-                                waitedMs += 50L
-                            }
-                        }
-
                         if (!isSpeaking) {
                             isSpeaking = true
                             if (isUserSpeaking) {

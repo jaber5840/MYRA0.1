@@ -89,6 +89,12 @@
             android:screenOrientation="portrait"
             android:theme="@style/Theme.Myra" />
 
+        <!-- BACKGROUND VOICE ASSISTANT SERVICE -->
+        <service
+            android:name=".service.MyraVoiceService"
+            android:foregroundServiceType="microphone|dataSync"
+            android:exported="false" />
+
         <!-- OVERLAY SERVICE -->
         <service
             android:name=".service.MyraOverlayService"

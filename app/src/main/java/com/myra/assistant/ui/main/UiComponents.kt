@@ -31,6 +31,13 @@ class ChatAdapter : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
         notifyItemInserted(messages.size - 1)
     }
 
+    fun submitMessages(newMessages: List<ChatMessage>) {
+        if (messages == newMessages) return
+        messages.clear()
+        messages.addAll(newMessages)
+        notifyDataSetChanged()
+    }
+
     fun lastMyraText(): String {
         return messages.lastOrNull { !it.isUser }?.text ?: ""
     }

@@ -57,6 +57,7 @@ class GeminiLiveClient(private val context: Context) {
     var onOutputTranscript: ((String) -> Unit)? = null
     var onInputTranscript: ((String) -> Unit)? = null
     var onTurnComplete: (() -> Unit)? = null
+    var onInterrupted: (() -> Unit)? = null
 
     private val sessionRenewalRunnable = Runnable {
         Log.i(TAG, "Renewing WebSocket session after 9 minutes...")
@@ -196,13 +197,14 @@ class GeminiLiveClient(private val context: Context) {
                                 })
                             })
                         })
-                        put("temperature", 0.9)
+                        put("temperature", 0.7)
                     })
                     put("realtime_input_config", JSONObject().apply {
                         put("automatic_activity_detection", JSONObject().apply {
+                            put("start_of_speech_sensitivity", "START_SENSITIVITY_HIGH")
                             put("end_of_speech_sensitivity", "END_SENSITIVITY_HIGH")
-                            put("silence_duration_ms", 450)
-                            put("prefix_padding_ms", 150)
+                            put("silence_duration_ms", 260)
+                            put("prefix_padding_ms", 220)
                         })
                     })
                     put("output_audio_transcription", JSONObject())
@@ -336,6 +338,10 @@ class GeminiLiveClient(private val context: Context) {
                         val inText = inputTranscription.getString("text")
                         handler.post { onInputTranscript?.invoke(inText) }
                     }
+                }
+
+                if (serverContent.optBoolean("interrupted", false)) {
+                    handler.post { onInterrupted?.invoke() }
                 }
 
                 if (serverContent.optBoolean("turnComplete", false)) {

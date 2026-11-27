@@ -23,19 +23,22 @@ import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.myra.assistant.BuildConfig
 import com.myra.assistant.R
-import com.myra.assistant.ai.AudioEngine
-import com.myra.assistant.ai.CommandParser
-import com.myra.assistant.ai.GeminiLiveClient
 import com.myra.assistant.databinding.ActivityMainBinding
 import com.myra.assistant.service.CallMonitorService
+import com.myra.assistant.service.MyraVoiceService
+import com.myra.assistant.service.MyraVoiceSession
 import com.myra.assistant.ui.settings.SettingsActivity
 import com.myra.assistant.update.GitHubUpdateChecker
 import com.myra.assistant.update.RemoteConfigUpdateManager
 import com.myra.assistant.update.UpdateDialogHelper
 import com.myra.assistant.viewmodel.MainViewModel
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -49,21 +52,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val viewModel: MainViewModel by viewModels()
 
-    private var geminiLive: GeminiLiveClient? = null
-    private var audioEngine: AudioEngine? = null
     private var speechRecognizer: SpeechRecognizer? = null
-
     private val chatAdapter = ChatAdapter()
 
-    private val inputBuffer = StringBuilder()
-    private val outputBuffer = StringBuilder()
-
-    private var isAiRunning = false
-    private var isMuted = true
-    private var isInCallMode = false
     private var pendingStartAfterPermission = false
-    private var hasGreetedThisSession = false
-    private var lastConfigSignature: String? = null
+    private var lastRedOverlayState = false
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -77,8 +70,9 @@ class MainActivity : AppCompatActivity() {
     private val callEndedReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             Log.i(TAG, "Call ended broadcast received")
-            isInCallMode = false
-            binding.statusText.text = "Sun rahi hoon... 🎙️"
+            sendServiceAction(MyraVoiceService.ACTION_SET_IN_CALL_MODE) {
+                putExtra(MyraVoiceService.EXTRA_IN_CALL_MODE, false)
+            }
         }
     }
 
@@ -112,6 +106,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         setupUI()
+        observeVoiceSession()
         checkAndRequestPermissions(autoStart = false)
         startStatusUpdates()
 
@@ -123,8 +118,12 @@ class MainActivity : AppCompatActivity() {
 
         viewModel.commandResult.observe(this) { result ->
             if (!result.isNullOrEmpty()) {
-                addMyraMessage(result)
-                geminiLive?.sendText(result)
+                MyraVoiceSession.addMyraMessage(result)
+                if (MyraVoiceSession.isRunning.value) {
+                    sendServiceAction(MyraVoiceService.ACTION_SEND_TEXT) {
+                        putExtra(MyraVoiceService.EXTRA_TEXT, result)
+                    }
+                }
             }
         }
 
@@ -132,11 +131,64 @@ class MainActivity : AppCompatActivity() {
         checkForAppUpdateOnLaunch()
     }
 
+    private fun observeVoiceSession() {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    MyraVoiceSession.isRunning.collect { running ->
+                        updateControlButtons(running, MyraVoiceSession.isMuted.value)
+                    }
+                }
+                launch {
+                    MyraVoiceSession.isMuted.collect { muted ->
+                        updateControlButtons(MyraVoiceSession.isRunning.value, muted)
+                    }
+                }
+                launch {
+                    MyraVoiceSession.isSpeaking.collect { speaking ->
+                        if (speaking != lastRedOverlayState) {
+                            lastRedOverlayState = speaking
+                            animateRedOverlay(speaking)
+                        }
+                    }
+                }
+                launch {
+                    MyraVoiceSession.orbState.collect { state ->
+                        binding.orbView.setState(state)
+                    }
+                }
+                launch {
+                    MyraVoiceSession.statusText.collect { text ->
+                        binding.statusText.text = text
+                    }
+                }
+                launch {
+                    MyraVoiceSession.amplitude.collect { amp ->
+                        binding.waveformView.setAmplitude(amp)
+                        binding.orbView.amplitude = amp
+                    }
+                }
+                launch {
+                    MyraVoiceSession.messages.collect { messages ->
+                        chatAdapter.submitMessages(messages)
+                        if (messages.isNotEmpty()) {
+                            binding.chatRecycler.smoothScrollToPosition(messages.size - 1)
+                        }
+                    }
+                }
+                launch {
+                    MyraVoiceSession.errorEvents.collect { err ->
+                        Toast.makeText(this@MainActivity, err, Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
     private fun checkForAppUpdateOnLaunch() {
         val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
         val lastCheck = prefs.getLong("last_update_check_ms", 0L)
-        // Short 1-minute cooldown so fresh app launches detect Remote Config / GitHub updates promptly
         if (now - lastCheck < 60 * 1000L) return
         prefs.edit().putLong("last_update_check_ms", now).apply()
 
@@ -175,7 +227,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.startStopBtn.setOnClickListener {
-            if (isAiRunning) {
+            if (MyraVoiceSession.isRunning.value) {
                 stopAiAssistant()
             } else {
                 startAiAssistant()
@@ -183,13 +235,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.orbView.setOnClickListener {
-            if (!isAiRunning) {
+            if (!MyraVoiceSession.isRunning.value) {
                 startAiAssistant()
             }
         }
 
         binding.micButton.setOnClickListener {
-            if (!isAiRunning) {
+            if (!MyraVoiceSession.isRunning.value) {
                 startAiAssistant()
             } else {
                 toggleMute()
@@ -201,10 +253,10 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-        updateControlButtons()
+        updateControlButtons(MyraVoiceSession.isRunning.value, MyraVoiceSession.isMuted.value)
     }
 
-    private fun updateControlButtons() {
+    private fun updateControlButtons(isAiRunning: Boolean, isMuted: Boolean) {
         if (isAiRunning) {
             binding.startStopBtn.text = "STOP"
             binding.startStopBtn.setIconResource(android.R.drawable.ic_media_pause)
@@ -272,18 +324,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun currentConfigSignature(): String {
-        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
-        return listOf(
-            prefs.getString("api_key", "") ?: "",
-            prefs.getString("gemini_model", "") ?: "",
-            prefs.getString("gemini_voice", "") ?: "",
-            prefs.getString("personality_mode", "") ?: "",
-            prefs.getString("language_mode", "Banglish") ?: "Banglish",
-            prefs.getString("user_name", "") ?: ""
-        ).joinToString("|")
-    }
-
     private fun getEffectiveApiKey(): String {
         val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
         var apiKey = prefs.getString("api_key", "")?.trim() ?: ""
@@ -296,11 +336,10 @@ class MainActivity : AppCompatActivity() {
     private fun startAiAssistant() {
         val apiKey = getEffectiveApiKey()
         if (apiKey.isEmpty()) {
-            isAiRunning = false
-            isMuted = true
-            updateControlButtons()
-            binding.orbView.setState(OrbAnimationView.State.IDLE)
-            binding.statusText.text = "Gemini API Key missing — add in Settings 🔑"
+            MyraVoiceSession.setRunning(false)
+            MyraVoiceSession.setMuted(true)
+            MyraVoiceSession.setOrbState(OrbAnimationView.State.IDLE)
+            MyraVoiceSession.setStatusText("Gemini API Key missing — add in Settings 🔑")
             AlertDialog.Builder(this)
                 .setTitle("Gemini API Key Required 🔑")
                 .setMessage("Please add your Gemini API Key in Settings before starting MYRA.")
@@ -317,197 +356,36 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        isAiRunning = true
-        isMuted = false
-        hasGreetedThisSession = false
-        updateControlButtons()
-
-        binding.orbView.setState(OrbAnimationView.State.THINKING)
-        binding.statusText.text = "Connecting to Gemini AI... ✨"
-
-        initGeminiLive()
-        audioEngine?.isMuted = false
-        audioEngine?.startPlayback()
-        audioEngine?.startRecording()
-
-        if (geminiLive?.isConnected == true && geminiLive?.isSessionReady == true) {
-            hasGreetedThisSession = true
-            sendGreeting()
-        } else {
-            geminiLive?.connect()
+        val intent = Intent(this, MyraVoiceService::class.java).apply {
+            action = MyraVoiceService.ACTION_START
         }
+        ContextCompat.startForegroundService(this, intent)
     }
 
     private fun stopAiAssistant() {
-        isAiRunning = false
-        isMuted = true
-        hasGreetedThisSession = false
-        audioEngine?.setExternalSpeaking(false)
-        geminiLive?.disconnect()
-        audioEngine?.isMuted = true
-        audioEngine?.stopRecording()
-        audioEngine?.clearPlaybackQueue()
-
-        binding.orbView.setState(OrbAnimationView.State.IDLE)
-        binding.waveformView.setAmplitude(0.05f)
-        animateRedOverlay(false)
-        binding.statusText.text = "Tap START to talk ✨"
-        updateControlButtons()
+        sendServiceAction(MyraVoiceService.ACTION_STOP)
     }
 
-    private fun initGeminiLive() {
-        lastConfigSignature = currentConfigSignature()
-
-        if (geminiLive == null) {
-            geminiLive = GeminiLiveClient(this).apply {
-                onConnected = {
-                    Log.i(TAG, "Gemini Live WebSocket Connected")
-                    if (isAiRunning) {
-                        audioEngine?.startRecording()
-                        audioEngine?.startPlayback()
-                        binding.orbView.setState(OrbAnimationView.State.THINKING)
-                        binding.statusText.text = "Connected, waking MYRA... ✨"
-                    }
-                }
-
-                onSetupComplete = {
-                    Log.i(TAG, "Gemini Live Setup Complete")
-                    if (isAiRunning) {
-                        binding.orbView.setState(OrbAnimationView.State.LISTENING)
-                        binding.statusText.text = "MYRA active — listening... 🎙️"
-                        if (!hasGreetedThisSession) {
-                            hasGreetedThisSession = true
-                            sendGreeting()
-                        }
-                    }
-                }
-
-                onDisconnected = {
-                    if (isAiRunning) {
-                        binding.orbView.setState(OrbAnimationView.State.THINKING)
-                        binding.statusText.text = "Reconnecting..."
-                    } else {
-                        binding.orbView.setState(OrbAnimationView.State.IDLE)
-                        binding.statusText.text = "Tap START to talk ✨"
-                    }
-                }
-
-                onError = { err ->
-                    if (isAiRunning) {
-                        Log.e(TAG, "Gemini Error: $err")
-                        val lowerErr = err.lowercase()
-                        if (lowerErr.contains("api key") || lowerErr.contains("unauthorized") || lowerErr.contains("permission")) {
-                            stopAiAssistant()
-                            binding.statusText.text = err
-                            Toast.makeText(this@MainActivity, err, Toast.LENGTH_LONG).show()
-                        } else {
-                            binding.statusText.text = err
-                        }
-                    }
-                }
-
-                onAudioReceived = { pcmBytes ->
-                    if (isAiRunning) {
-                        audioEngine?.queueAudio(pcmBytes)
-                    }
-                }
-
-                onOutputTranscript = { text ->
-                    outputBuffer.append(text)
-                }
-
-                onInputTranscript = { text ->
-                    inputBuffer.append(text)
-                }
-
-                onTurnComplete = {
-                    audioEngine?.markAiTurnComplete()
-                    val userText = inputBuffer.toString().trim()
-                    val myraText = outputBuffer.toString().trim()
-
-                    if (userText.isNotEmpty()) {
-                        addUserMessage(userText)
-                        val cmd = CommandParser.parse(userText)
-                        if (cmd != null) {
-                            viewModel.executeCommand(cmd)
-                        }
-                    }
-
-                    if (myraText.isNotEmpty()) {
-                        addMyraMessage(myraText)
-                    }
-
-                    inputBuffer.clear()
-                    outputBuffer.clear()
-                }
-            }
-        }
-
-        if (audioEngine == null) {
-            audioEngine = AudioEngine(this).apply {
-                onAudioChunkRecorded = { base64 ->
-                    if (isAiRunning && !isInCallMode && !isMicBlockedByAi()) {
-                        geminiLive?.sendAudioChunk(base64)
-                    }
-                }
-
-                onUserSpeechStateChanged = { userSpeaking ->
-                    runOnUiThread {
-                        if (!isAiRunning || isMicBlockedByAi()) return@runOnUiThread
-                        if (userSpeaking) {
-                            binding.orbView.setState(OrbAnimationView.State.LISTENING)
-                            binding.statusText.text = "Shunchi, bolun... 🎙️"
-                        } else {
-                            binding.orbView.setState(OrbAnimationView.State.THINKING)
-                            binding.statusText.text = "Thinking... ✨"
-                        }
-                    }
-                }
-
-                onAmplitudeChanged = { rms ->
-                    runOnUiThread {
-                        binding.waveformView.setAmplitude(rms)
-                        binding.orbView.amplitude = rms
-                    }
-                }
-
-                onSpeakingStarted = {
-                    runOnUiThread {
-                        binding.orbView.setState(OrbAnimationView.State.SPEAKING)
-                        binding.statusText.text = "Bol rahi hoon... 🔊"
-                        animateRedOverlay(true)
-                    }
-                }
-
-                onSpeakingStopped = {
-                    runOnUiThread {
-                        if (isAiRunning) {
-                            binding.orbView.setState(OrbAnimationView.State.LISTENING)
-                            binding.statusText.text = if (isMuted) "Microphone Muted 🔇" else "Sun rahi hoon... 🎙️"
-                        } else {
-                            binding.orbView.setState(OrbAnimationView.State.IDLE)
-                            binding.statusText.text = "Tap START to talk ✨"
-                        }
-                        animateRedOverlay(false)
-                    }
-                }
-            }
-        }
+    private fun toggleMute() {
+        sendServiceAction(MyraVoiceService.ACTION_TOGGLE_MUTE)
     }
 
-    private fun sendGreeting() {
-        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
-        val name = prefs.getString("user_name", "Alex") ?: "Alex"
-        val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
+    private fun interruptMyra() {
+        sendServiceAction(MyraVoiceService.ACTION_INTERRUPT)
+        Toast.makeText(this, "MYRA stopped speaking", Toast.LENGTH_SHORT).show()
+    }
 
-        val prompt = when (language) {
-            "Bangla" -> "Greet $name warmly in natural Bengali (বাংলা) in 1 short sentence right now and ask how you can help."
-            "English" -> "Greet $name warmly in clear English in 1 short sentence right now and ask how you can help."
-            "Hindi" -> "Greet $name warmly in natural Hindi/Hinglish in 1 short sentence right now and ask how you can help."
-            else -> "Greet $name warmly in Banglish (Bengali + English mix) in 1 short sentence right now and ask how you can help."
+    private fun sendServiceAction(action: String, extras: (Intent.() -> Unit)? = null) {
+        val intent = Intent(this, MyraVoiceService::class.java).apply {
+            this.action = action
+            extras?.invoke(this)
         }
-
-        geminiLive?.sendText(prompt)
+        try {
+            startService(intent)
+        } catch (e: Exception) {
+            Log.w(TAG, "Falling back to startForegroundService for $action: ${e.message}")
+            ContextCompat.startForegroundService(this, intent)
+        }
     }
 
     private fun handleIncomingCallIntent(intent: Intent?) {
@@ -518,10 +396,16 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun announceCall(callerName: String) {
-        isInCallMode = true
+        sendServiceAction(MyraVoiceService.ACTION_SET_IN_CALL_MODE) {
+            putExtra(MyraVoiceService.EXTRA_IN_CALL_MODE, true)
+        }
         val announcement = "Sir, $callerName ka call aa raha hai. Uthau ya reject karu?"
-        addMyraMessage(announcement)
-        geminiLive?.sendText(announcement)
+        MyraVoiceSession.addMyraMessage(announcement)
+        if (MyraVoiceSession.isRunning.value) {
+            sendServiceAction(MyraVoiceService.ACTION_SEND_TEXT) {
+                putExtra(MyraVoiceService.EXTRA_TEXT, announcement)
+            }
+        }
 
         handler.postDelayed({
             startCallDecisionRecognizer()
@@ -539,7 +423,9 @@ class MainActivity : AppCompatActivity() {
                 override fun onBufferReceived(buffer: ByteArray?) {}
                 override fun onEndOfSpeech() {}
                 override fun onError(error: Int) {
-                    isInCallMode = false
+                    sendServiceAction(MyraVoiceService.ACTION_SET_IN_CALL_MODE) {
+                        putExtra(MyraVoiceService.EXTRA_IN_CALL_MODE, false)
+                    }
                 }
 
                 override fun onResults(results: Bundle?) {
@@ -549,12 +435,14 @@ class MainActivity : AppCompatActivity() {
 
                     if (text.contains("uthao") || text.contains("haan") || text.contains("accept") || text.contains("pick")) {
                         viewModel.acceptCall()
-                        addMyraMessage("Call utha diya sir.")
+                        MyraVoiceSession.addMyraMessage("Call utha diya sir.")
                     } else if (text.contains("reject") || text.contains("nahi") || text.contains("mat") || text.contains("cut")) {
                         viewModel.rejectCall()
-                        addMyraMessage("Call reject kar diya sir.")
+                        MyraVoiceSession.addMyraMessage("Call reject kar diya sir.")
                     }
-                    isInCallMode = false
+                    sendServiceAction(MyraVoiceService.ACTION_SET_IN_CALL_MODE) {
+                        putExtra(MyraVoiceService.EXTRA_IN_CALL_MODE, false)
+                    }
                 }
 
                 override fun onPartialResults(partialResults: Bundle?) {}
@@ -567,33 +455,6 @@ class MainActivity : AppCompatActivity() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
         }
         speechRecognizer?.startListening(recognizerIntent)
-    }
-
-    private fun toggleMute() {
-        isMuted = !isMuted
-        audioEngine?.isMuted = isMuted
-        binding.micButton.setImageResource(if (isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic_on)
-        binding.statusText.text = if (isMuted) "Microphone Muted 🔇" else "Sun rahi hoon... 🎙️"
-    }
-
-    private fun interruptMyra() {
-        audioEngine?.clearPlaybackQueue()
-        geminiLive?.sendInterrupt()
-        if (isAiRunning) {
-            binding.orbView.setState(OrbAnimationView.State.LISTENING)
-            binding.statusText.text = "Stopped. Sun rahi hoon... 🎙️"
-        }
-        Toast.makeText(this, "MYRA stopped speaking", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun addUserMessage(text: String) {
-        chatAdapter.addMessage(ChatMessage(text = text, isUser = true))
-        binding.chatRecycler.smoothScrollToPosition(chatAdapter.itemCount - 1)
-    }
-
-    private fun addMyraMessage(text: String) {
-        chatAdapter.addMessage(ChatMessage(text = text, isUser = false))
-        binding.chatRecycler.smoothScrollToPosition(chatAdapter.itemCount - 1)
     }
 
     private fun animateRedOverlay(show: Boolean) {
@@ -627,24 +488,11 @@ class MainActivity : AppCompatActivity() {
         binding.timeText.text = timeStr
     }
 
-    override fun onPause() {
-        super.onPause()
-        audioEngine?.isMuted = true
-    }
-
     override fun onResume() {
         super.onResume()
-        if (isAiRunning && !isMuted) {
-            audioEngine?.isMuted = false
-        }
         updateSystemStatus()
-
-        val currentSig = currentConfigSignature()
-        if (isAiRunning && geminiLive != null && lastConfigSignature != null && currentSig != lastConfigSignature) {
-            lastConfigSignature = currentSig
-            binding.statusText.text = "Reconnecting with updated settings..."
-            hasGreetedThisSession = false
-            geminiLive?.reconnect()
+        if (MyraVoiceSession.isRunning.value) {
+            sendServiceAction(MyraVoiceService.ACTION_RECONNECT_IF_CONFIG_CHANGED)
         }
     }
 
@@ -656,7 +504,6 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {}
 
         speechRecognizer?.destroy()
-        geminiLive?.disconnect()
-        audioEngine?.release()
+        // MyraVoiceService stays alive in the background until user explicitly taps STOP
     }
 }
