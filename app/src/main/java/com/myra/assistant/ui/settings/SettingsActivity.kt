@@ -20,6 +20,7 @@ import com.myra.assistant.BuildConfig
 import com.myra.assistant.R
 import com.myra.assistant.databinding.ActivitySettingsBinding
 import com.myra.assistant.service.AccessibilityHelperService
+import com.myra.assistant.update.GitHubUpdateChecker
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
@@ -78,6 +79,64 @@ class SettingsActivity : AppCompatActivity() {
 
         binding.testApiKeyBtn.setOnClickListener {
             testGeminiApiKey()
+        }
+
+        binding.checkUpdateBtn.setOnClickListener {
+            checkForUpdatesManually()
+        }
+    }
+
+    private fun checkForUpdatesManually() {
+        val repo = GitHubUpdateChecker.saveConfiguredRepo(this, binding.githubRepoInput.text.toString())
+        binding.githubRepoInput.setText(repo)
+        binding.checkUpdateBtn.isEnabled = false
+        binding.checkUpdateBtn.text = "CHECKING GITHUB..."
+
+        GitHubUpdateChecker.checkLatestRelease(this, repo) { result ->
+            runOnUiThread {
+                binding.checkUpdateBtn.isEnabled = true
+                binding.checkUpdateBtn.text = "CHECK FOR UPDATES"
+
+                when (result) {
+                    is GitHubUpdateChecker.CheckResult.UpdateAvailable -> {
+                        val release = result.release
+                        AlertDialog.Builder(this@SettingsActivity)
+                            .setTitle("Update Available: ${release.tagName} 🚀")
+                            .setMessage(
+                                "Installed: v${BuildConfig.VERSION_NAME}\n" +
+                                    "Latest: ${release.tagName}\n\n" +
+                                    release.releaseNotes.take(450)
+                            )
+                            .setPositiveButton(if (release.apkDownloadUrl != null) "DOWNLOAD APK" else "OPEN RELEASE") { _, _ ->
+                                GitHubUpdateChecker.openReleaseInBrowser(
+                                    this@SettingsActivity,
+                                    release,
+                                    preferApkLink = release.apkDownloadUrl != null
+                                )
+                            }
+                            .setNeutralButton("RELEASE PAGE") { _, _ ->
+                                GitHubUpdateChecker.openReleaseInBrowser(this@SettingsActivity, release, preferApkLink = false)
+                            }
+                            .setNegativeButton("LATER", null)
+                            .show()
+                    }
+                    is GitHubUpdateChecker.CheckResult.UpToDate -> {
+                        val latestNote = if (result.latestTag != null) " (Latest: ${result.latestTag})" else ""
+                        AlertDialog.Builder(this@SettingsActivity)
+                            .setTitle("Up to Date ✅")
+                            .setMessage("MYRA v${result.currentVersion} is already the latest version$latestNote.")
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
+                    is GitHubUpdateChecker.CheckResult.Error -> {
+                        AlertDialog.Builder(this@SettingsActivity)
+                            .setTitle("Update Check Info ⚠️")
+                            .setMessage(result.message)
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
+                }
+            }
         }
     }
 
@@ -243,6 +302,12 @@ class SettingsActivity : AppCompatActivity() {
                 }
 
                 val (activeChatModels, activeLiveModels) = parseModelsFromResponse(listResponseStr)
+                if (activeChatModels.isNotEmpty()) {
+                    getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+                        .edit()
+                        .putString("cached_active_chat_models", JSONArray(activeChatModels.take(6)).toString())
+                        .apply()
+                }
                 if (activeLiveModels.isNotEmpty()) {
                     runOnUiThread {
                         updateLiveModelSpinner(activeLiveModels)
@@ -422,6 +487,16 @@ class SettingsActivity : AppCompatActivity() {
             else -> binding.radioGf.isChecked = true
         }
 
+        when (prefs.getString("language_mode", "Banglish")) {
+            "Bangla" -> binding.radioLangBangla.isChecked = true
+            "English" -> binding.radioLangEnglish.isChecked = true
+            "Hindi" -> binding.radioLangHindi.isChecked = true
+            else -> binding.radioLangBanglish.isChecked = true
+        }
+
+        binding.appVersionText.text = "v${BuildConfig.VERSION_NAME}"
+        binding.githubRepoInput.setText(GitHubUpdateChecker.getConfiguredRepo(this))
+
         primeContacts.clear()
         val jsonStr = prefs.getString("prime_contacts_json", null)
         if (!jsonStr.isNullOrEmpty()) {
@@ -482,6 +557,13 @@ class SettingsActivity : AppCompatActivity() {
             else -> "GF"
         }
 
+        val language = when {
+            binding.radioLangBangla.isChecked -> "Bangla"
+            binding.radioLangEnglish.isChecked -> "English"
+            binding.radioLangHindi.isChecked -> "Hindi"
+            else -> "Banglish"
+        }
+
         val array = JSONArray()
         for (c in primeContacts) {
             val obj = JSONObject().apply {
@@ -491,12 +573,16 @@ class SettingsActivity : AppCompatActivity() {
             array.put(obj)
         }
 
+        val githubRepo = GitHubUpdateChecker.normalizeRepo(binding.githubRepoInput.text.toString())
+
         prefs.edit()
             .putString("api_key", apiKey)
             .putString("user_name", userName)
             .putString("gemini_model", selectedModel)
             .putString("gemini_voice", selectedVoice)
             .putString("personality_mode", personality)
+            .putString("language_mode", language)
+            .putString("github_repo", githubRepo)
             .putString("prime_contacts_json", array.toString())
             .apply()
 

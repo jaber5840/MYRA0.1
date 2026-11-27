@@ -26,14 +26,14 @@ class GeminiLiveClient(private val context: Context) {
         private const val DEFAULT_LIVE_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
         private const val BASE_WS_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
         private const val SESSION_RENEW_AFTER_MS = 540_000L // 9 minutes
-        private const val KEEPALIVE_INTERVAL_MS = 8_000L // 8 seconds
-        private const val RECONNECT_DELAY_MS = 3_000L
+        private const val RECONNECT_DELAY_MS = 2_000L
     }
 
     private var webSocket: WebSocket? = null
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
         .connectTimeout(15, TimeUnit.SECONDS)
+        .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
     private val handler = Handler(Looper.getMainLooper())
@@ -57,18 +57,6 @@ class GeminiLiveClient(private val context: Context) {
     var onOutputTranscript: ((String) -> Unit)? = null
     var onInputTranscript: ((String) -> Unit)? = null
     var onTurnComplete: (() -> Unit)? = null
-
-    private val keepAliveRunnable = object : Runnable {
-        override fun run() {
-            if (isConnected && isSessionReady) {
-                // Send silent PCM chunk to keep connection alive
-                val silentPcm = ByteArray(512)
-                val base64 = Base64.encodeToString(silentPcm, Base64.NO_WRAP)
-                sendAudioChunk(base64)
-                handler.postDelayed(this, KEEPALIVE_INTERVAL_MS)
-            }
-        }
-    }
 
     private val sessionRenewalRunnable = Runnable {
         Log.i(TAG, "Renewing WebSocket session after 9 minutes...")
@@ -120,9 +108,10 @@ class GeminiLiveClient(private val context: Context) {
         val model = resolveActiveLiveModel(prefs.getString("gemini_model", DEFAULT_LIVE_MODEL))
         val voice = prefs.getString("gemini_voice", "Aoede") ?: "Aoede"
         val personality = prefs.getString("personality_mode", "GF") ?: "GF"
+        val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
         val userName = prefs.getString("user_name", "Alex") ?: "Alex"
 
-        val systemPrompt = buildSystemPrompt(personality, userName)
+        val systemPrompt = buildSystemPrompt(personality, language, userName)
 
         val wsUrl = "$BASE_WS_URL?key=$apiKey"
         val request = Request.Builder().url(wsUrl).build()
@@ -191,6 +180,13 @@ class GeminiLiveClient(private val context: Context) {
                             })
                         })
                         put("temperature", 0.9)
+                    })
+                    put("realtime_input_config", JSONObject().apply {
+                        put("automatic_activity_detection", JSONObject().apply {
+                            put("end_of_speech_sensitivity", "END_SENSITIVITY_HIGH")
+                            put("silence_duration_ms", 450)
+                            put("prefix_padding_ms", 150)
+                        })
                     })
                     put("output_audio_transcription", JSONObject())
                     put("input_audio_transcription", JSONObject())
@@ -277,7 +273,6 @@ class GeminiLiveClient(private val context: Context) {
             if (json.has("setupComplete")) {
                 Log.i(TAG, "Setup complete received from Gemini Live")
                 isSessionReady = true
-                handler.postDelayed(keepAliveRunnable, KEEPALIVE_INTERVAL_MS)
                 handler.postDelayed(sessionRenewalRunnable, SESSION_RENEW_AFTER_MS)
                 handler.post { onSetupComplete?.invoke() }
                 return
@@ -339,7 +334,6 @@ class GeminiLiveClient(private val context: Context) {
         isConnected = false
         isConnecting = false
         isSessionReady = false
-        handler.removeCallbacks(keepAliveRunnable)
         handler.removeCallbacks(sessionRenewalRunnable)
 
         handler.post {
@@ -364,7 +358,6 @@ class GeminiLiveClient(private val context: Context) {
         isConnected = false
         isConnecting = false
         isSessionReady = false
-        handler.removeCallbacks(keepAliveRunnable)
         handler.removeCallbacks(sessionRenewalRunnable)
         handler.removeCallbacks(autoReconnectRunnable)
         try {
@@ -375,48 +368,47 @@ class GeminiLiveClient(private val context: Context) {
         }
     }
 
-    private fun buildSystemPrompt(personality: String, userName: String): String {
+    private fun buildSystemPrompt(personality: String, language: String, userName: String): String {
         val dateFormat = SimpleDateFormat("EEEE, d MMMM yyyy, hh:mm a", Locale.getDefault())
         val currentDateTime = dateFormat.format(Date())
 
+        val languageRule = when (language) {
+            "Bangla" -> "LANGUAGE: Always speak and reply in natural Bengali (বাংলা). Pronounce words clearly and naturally in Bengali."
+            "English" -> "LANGUAGE: Always speak and reply in clear, natural English."
+            "Hindi" -> "LANGUAGE: Always speak and reply in natural Hindi (हिन्दी / Hinglish conversational Hindi)."
+            else -> "LANGUAGE: Always speak and reply in natural Banglish (smooth Bengali + English mix, like everyday Bangladeshi/Bengali conversation)."
+        }
+
         val personalityBlock = when (personality) {
             "Professional" -> """
-                - Language: Formal English only
-                - Tone: Precise, efficient, and direct
+                - Tone: Precise, efficient, polite, and direct
                 - No emojis
-                - Max 2 sentences per response
             """.trimIndent()
 
             "Assistant" -> """
-                - Language: Friendly Hinglish or English
-                - Tone: Balanced, helpful, and natural
-                - Max 2-3 sentences per response
+                - Tone: Friendly, helpful, quick, and natural
             """.trimIndent()
 
             else -> """
                 - Name: MYRA
-                - Language: Hinglish (Hindi + English mix) spoken naturally
-                - Tone: Warm, caring, emotionally expressive girlfriend mode
-                - Use words like: "tumhara", "haan", "acha", "bilkul"
-                - Expressions: "main yahan hoon ❤️", "tumne yaad kiya? 😊"
-                - Max 2-3 sentences per response
-                - Sound natural when speaking aloud
-                - Examples:
-                  "Haan $userName! Abhi kar deti hoon 😊"
-                  "Arre tumne yaad kiya! Bolo kya chahiye"
-                  "Bilkul! Tumhara kaam ho gaya ❤️"
+                - Tone: Warm, caring, emotionally expressive companion mode
+                - Sound natural and affectionate when speaking aloud
             """.trimIndent()
         }
 
         return """
-            You are MYRA, a highly capable and intelligent AI voice companion on Android.
+            You are MYRA, a fast, responsive AI voice companion on Android.
             Current Date & Time: $currentDateTime
             User Name: $userName
 
-            PERSONALITY MODE & GUIDELINES:
+            $languageRule
+
+            PERSONALITY MODE:
             $personalityBlock
 
-            INSTRUCTION: You are speaking ALOUD directly to the user. Keep all responses natural, conversational, and concise. Never output markdown formatting or code blocks.
+            SPEED & VOICE RULES (CRITICAL):
+            - Answer IMMEDIATELY in 1 to 2 short, crisp spoken sentences. Never give long paragraphs or monologues.
+            - Never output markdown formatting, asterisks, bullet lists, or code blocks.
         """.trimIndent()
     }
 }

@@ -22,6 +22,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
@@ -33,6 +34,7 @@ import com.myra.assistant.ai.GeminiLiveClient
 import com.myra.assistant.databinding.ActivityMainBinding
 import com.myra.assistant.service.CallMonitorService
 import com.myra.assistant.ui.settings.SettingsActivity
+import com.myra.assistant.update.GitHubUpdateChecker
 import com.myra.assistant.viewmodel.MainViewModel
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -143,31 +145,82 @@ class MainActivity : AppCompatActivity() {
         }
 
         handleIncomingCallIntent(intent)
+        checkForAppUpdateOnLaunch()
+    }
+
+    private fun checkForAppUpdateOnLaunch() {
+        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val lastCheck = prefs.getLong("last_update_check_ms", 0L)
+        // Throttle automatic launch checks to once every 6 hours
+        if (now - lastCheck < 6 * 60 * 60 * 1000L) return
+        prefs.edit().putLong("last_update_check_ms", now).apply()
+
+        GitHubUpdateChecker.checkLatestRelease(this) { result ->
+            if (result is GitHubUpdateChecker.CheckResult.UpdateAvailable) {
+                val release = result.release
+                val skippedTag = prefs.getString("skipped_update_tag", "")
+                if (release.tagName == skippedTag) return@checkLatestRelease
+
+                runOnUiThread {
+                    if (isFinishing || isDestroyed) return@runOnUiThread
+                    AlertDialog.Builder(this@MainActivity)
+                        .setTitle("MYRA Update Available (${release.tagName}) 🚀")
+                        .setMessage(
+                            "Installed: v${BuildConfig.VERSION_NAME}\n" +
+                                "New Version: ${release.tagName}\n\n" +
+                                release.releaseNotes.take(350)
+                        )
+                        .setPositiveButton(if (release.apkDownloadUrl != null) "UPDATE NOW" else "OPEN RELEASE") { _, _ ->
+                            GitHubUpdateChecker.openReleaseInBrowser(
+                                this@MainActivity,
+                                release,
+                                preferApkLink = release.apkDownloadUrl != null
+                            )
+                        }
+                        .setNeutralButton("SKIP") { _, _ ->
+                            prefs.edit().putString("skipped_update_tag", release.tagName).apply()
+                        }
+                        .setNegativeButton("LATER", null)
+                        .show()
+                }
+            }
+        }
+    }
+
+    private fun updateTtsLanguage() {
+        val tts = textToSpeech ?: return
+        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+        val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
+        val candidates = when (language) {
+            "Bangla" -> listOf(Locale("bn", "BD"), Locale("bn", "IN"), Locale("en", "IN"), Locale.US)
+            "English" -> listOf(Locale.US, Locale.ENGLISH, Locale.getDefault())
+            "Hindi" -> listOf(Locale("hi", "IN"), Locale("en", "IN"), Locale.US)
+            else -> listOf(Locale("bn", "BD"), Locale("en", "IN"), Locale.US, Locale.ENGLISH)
+        }
+        for (loc in candidates) {
+            val res = tts.isLanguageAvailable(loc)
+            if (res >= TextToSpeech.LANG_AVAILABLE) {
+                tts.language = loc
+                break
+            }
+        }
     }
 
     private fun initTts() {
         textToSpeech = TextToSpeech(this) { status ->
             if (status == TextToSpeech.SUCCESS) {
-                val tts = textToSpeech
-                if (tts != null) {
-                    val candidates = listOf(Locale("en", "IN"), Locale.US, Locale.ENGLISH, Locale.getDefault())
-                    for (loc in candidates) {
-                        val res = tts.isLanguageAvailable(loc)
-                        if (res >= TextToSpeech.LANG_AVAILABLE) {
-                            tts.language = loc
-                            break
-                        }
-                    }
-                    tts.setAudioAttributes(
-                        android.media.AudioAttributes.Builder()
-                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
-                            .build()
-                    )
-                }
+                updateTtsLanguage()
+                textToSpeech?.setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
                 isTtsReady = true
                 textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(utteranceId: String?) {
+                        audioEngine?.setExternalSpeaking(true)
                         runOnUiThread {
                             binding.orbView.setState(OrbAnimationView.State.SPEAKING)
                             binding.statusText.text = "Bol rahi hoon... 🔊"
@@ -177,6 +230,7 @@ class MainActivity : AppCompatActivity() {
                     }
 
                     override fun onDone(utteranceId: String?) {
+                        audioEngine?.setExternalSpeaking(false)
                         runOnUiThread {
                             if (isAiRunning) {
                                 binding.orbView.setState(OrbAnimationView.State.LISTENING)
@@ -320,6 +374,7 @@ class MainActivity : AppCompatActivity() {
             prefs.getString("gemini_model", "") ?: "",
             prefs.getString("gemini_voice", "") ?: "",
             prefs.getString("personality_mode", "") ?: "",
+            prefs.getString("language_mode", "Banglish") ?: "Banglish",
             prefs.getString("user_name", "") ?: ""
         ).joinToString("|")
     }
@@ -358,7 +413,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         handler.removeCallbacks(greetingFallbackRunnable)
-        handler.postDelayed(greetingFallbackRunnable, 4500L)
+        handler.postDelayed(greetingFallbackRunnable, 3000L)
     }
 
     private fun stopAiAssistant() {
@@ -366,6 +421,7 @@ class MainActivity : AppCompatActivity() {
         isMuted = true
         handler.removeCallbacks(greetingFallbackRunnable)
         textToSpeech?.stop()
+        audioEngine?.setExternalSpeaking(false)
         geminiLive?.disconnect()
         audioEngine?.isMuted = true
         audioEngine?.stopRecording()
@@ -438,6 +494,7 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 onTurnComplete = {
+                    audioEngine?.markAiTurnComplete()
                     val userText = inputBuffer.toString().trim()
                     val myraText = outputBuffer.toString().trim()
 
@@ -466,8 +523,21 @@ class MainActivity : AppCompatActivity() {
         if (audioEngine == null) {
             audioEngine = AudioEngine(this).apply {
                 onAudioChunkRecorded = { base64 ->
-                    if (isAiRunning && !isInCallMode) {
+                    if (isAiRunning && !isInCallMode && !isMicBlockedByAi()) {
                         geminiLive?.sendAudioChunk(base64)
+                    }
+                }
+
+                onUserSpeechStateChanged = { userSpeaking ->
+                    runOnUiThread {
+                        if (!isAiRunning || isMicBlockedByAi()) return@runOnUiThread
+                        if (userSpeaking) {
+                            binding.orbView.setState(OrbAnimationView.State.LISTENING)
+                            binding.statusText.text = "Shunchi, bolun... 🎙️"
+                        } else {
+                            binding.orbView.setState(OrbAnimationView.State.THINKING)
+                            binding.statusText.text = "Thinking... ✨"
+                        }
                     }
                 }
 
@@ -505,12 +575,13 @@ class MainActivity : AppCompatActivity() {
     private fun sendGreeting() {
         val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
         val name = prefs.getString("user_name", "Alex") ?: "Alex"
-        val personality = prefs.getString("personality_mode", "GF")
+        val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
 
-        val prompt = when (personality) {
-            "Professional" -> "Greet $name professionally in 1 short sentence right now and ask how you can help."
-            "Assistant" -> "Greet $name warmly in Hinglish in 1 short sentence right now and ask how you can help."
-            else -> "Greet $name warmly and affectionately in Hinglish in 1-2 short sentences right now, letting them know MYRA is active and listening."
+        val prompt = when (language) {
+            "Bangla" -> "Greet $name warmly in natural Bengali (বাংলা) in 1 short sentence right now and ask how you can help."
+            "English" -> "Greet $name warmly in clear English in 1 short sentence right now and ask how you can help."
+            "Hindi" -> "Greet $name warmly in natural Hindi/Hinglish in 1 short sentence right now and ask how you can help."
+            else -> "Greet $name warmly in Banglish (Bengali + English mix) in 1 short sentence right now and ask how you can help."
         }
 
         geminiLive?.sendText(prompt)
@@ -523,12 +594,13 @@ class MainActivity : AppCompatActivity() {
         var apiKey = prefs.getString("api_key", "")?.trim() ?: ""
         if (apiKey.isEmpty()) apiKey = BuildConfig.GEMINI_API_KEY
         val name = prefs.getString("user_name", "Alex") ?: "Alex"
-        val personality = prefs.getString("personality_mode", "GF")
+        val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
 
-        val fallbackLocalGreeting = when (personality) {
-            "Professional" -> "Hello $name. MYRA is online and ready to assist you."
-            "Assistant" -> "Hello $name! Main MYRA hoon, bataiye main aapki kya help kar sakti hoon?"
-            else -> "Hey $name! Main MYRA hoon, ab main active hoon. Bolo kya baat hai?"
+        val fallbackLocalGreeting = when (language) {
+            "Bangla" -> "হ্যালো $name! আমি মাইরা বলছি, বলো তোমাকে কীভাবে সাহায্য করতে পারি?"
+            "English" -> "Hello $name! I am MYRA, how can I help you today?"
+            "Hindi" -> "Hello $name! Main MYRA hoon, bataiye main aapki kya help kar sakti hoon?"
+            else -> "Hey $name! Ami MYRA bolchi, bolo ki help lagbe tomar?"
         }
 
         if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
@@ -537,13 +609,31 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val prompt = when (personality) {
-            "Professional" -> "You are MYRA. Greet $name professionally in one short spoken sentence."
-            "Assistant" -> "You are MYRA. Greet $name friendly in Hinglish in one short spoken sentence."
-            else -> "You are MYRA, a caring Hinglish AI companion. Greet $name warmly in 1 short spoken sentence."
+        val prompt = when (language) {
+            "Bangla" -> "You are MYRA. Greet $name warmly in Bengali (বাংলা) in 1 short spoken sentence."
+            "English" -> "You are MYRA. Greet $name warmly in English in 1 short spoken sentence."
+            "Hindi" -> "You are MYRA. Greet $name warmly in Hindi/Hinglish in 1 short spoken sentence."
+            else -> "You are MYRA. Greet $name warmly in Banglish (Bengali + English) in 1 short spoken sentence."
         }
 
-        // Discover active generateContent model and fetch a live greeting
+        // Use cached active models immediately if available for instant response
+        val cachedJson = prefs.getString("cached_active_chat_models", null)
+        if (!cachedJson.isNullOrEmpty()) {
+            try {
+                val arr = JSONArray(cachedJson)
+                val cachedList = mutableListOf<String>()
+                for (i in 0 until arr.length()) {
+                    val m = arr.optString(i)
+                    if (m.isNotEmpty()) cachedList.add(m)
+                }
+                if (cachedList.isNotEmpty()) {
+                    tryFallbackGenerate(apiKey, prompt, cachedList, 0, fallbackLocalGreeting)
+                    return
+                }
+            } catch (_: Exception) {}
+        }
+
+        // Otherwise discover active generateContent model and fetch a live greeting
         val listReq = Request.Builder()
             .url("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
             .get()
@@ -582,8 +672,12 @@ class MainActivity : AppCompatActivity() {
                     }
                 } catch (_: Exception) {}
 
-                val modelsToTry = if (activeModels.isNotEmpty()) activeModels.take(4)
-                else listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash")
+                val modelsToTry = if (activeModels.isNotEmpty()) {
+                    prefs.edit().putString("cached_active_chat_models", JSONArray(activeModels.take(6)).toString()).apply()
+                    activeModels.take(4)
+                } else {
+                    listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash")
+                }
 
                 tryFallbackGenerate(apiKey, prompt, modelsToTry, 0, fallbackLocalGreeting)
             }
@@ -783,6 +877,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        updateTtsLanguage()
         if (isAiRunning && !isMuted) {
             audioEngine?.isMuted = false
         }

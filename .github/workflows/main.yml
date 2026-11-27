@@ -1,10 +1,15 @@
-name: MYRA APK Builder
+name: MYRA APK Builder & Release
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -23,13 +28,38 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Resolve Release Version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG_VER="${GITHUB_REF_NAME#v}"
+            echo "app_version=$TAG_VER" >> "$GITHUB_OUTPUT"
+          else
+            echo "app_version=1.0.0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build APK
+        env:
+          APP_VERSION_NAME: ${{ steps.version.outputs.app_version }}
+          APP_VERSION_CODE: ${{ github.run_number }}
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      - name: Upload APK
+      - name: Rename APK for Release
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/MYRA-v${{ steps.version.outputs.app_version }}.apk"
+
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: MYRA-APK
-          path: app/build/outputs/apk/debug/*.apk
+          path: app/build/outputs/apk/debug/MYRA-v*.apk
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "MYRA ${{ github.ref_name }}"
+          generate_release_notes: true
+          files: app/build/outputs/apk/debug/MYRA-v*.apk

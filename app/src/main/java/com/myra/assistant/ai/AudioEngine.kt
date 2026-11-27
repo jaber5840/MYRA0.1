@@ -10,7 +10,8 @@ import android.media.MediaRecorder
 import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import kotlin.math.sqrt
 
@@ -21,11 +22,24 @@ class AudioEngine(private val context: Context) {
         private const val MIC_SAMPLE_RATE = 16000
         private const val SPEAKER_SAMPLE_RATE = 24000
         private const val CHUNK_SIZE = 1024
+        private const val USER_SPEECH_RMS_THRESHOLD = 0.04f
+        private const val USER_SPEECH_END_MS = 650L
+        private const val AI_POST_SPEECH_COOLDOWN_MS = 450L
+        private const val CHUNK_GAP_GRACE_MS = 350L
     }
 
     @Volatile var isMuted: Boolean = false
     @Volatile var isSpeaking: Boolean = false
         private set
+
+    @Volatile var isUserSpeaking: Boolean = false
+        private set
+
+    @Volatile private var isAiTurnActive: Boolean = false
+    @Volatile private var isExternalSpeaking: Boolean = false
+    @Volatile private var micUnmuteAfterMs: Long = 0L
+    @Volatile private var lastAudioQueuedAtMs: Long = 0L
+    @Volatile private var lastUserSpeechAtMs: Long = 0L
 
     @Volatile private var isRecording: Boolean = false
     @Volatile private var isPlaying: Boolean = false
@@ -33,12 +47,13 @@ class AudioEngine(private val context: Context) {
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
 
-    private val playbackQueue = ConcurrentLinkedQueue<ByteArray>()
+    private val playbackQueue = LinkedBlockingQueue<ByteArray>()
 
     var onAudioChunkRecorded: ((String) -> Unit)? = null
     var onAmplitudeChanged: ((Float) -> Unit)? = null
     var onSpeakingStarted: (() -> Unit)? = null
     var onSpeakingStopped: (() -> Unit)? = null
+    var onUserSpeechStateChanged: ((Boolean) -> Unit)? = null
 
     private var recordingThread: Thread? = null
     private var playbackThread: Thread? = null
@@ -54,7 +69,8 @@ class AudioEngine(private val context: Context) {
                 AudioFormat.CHANNEL_OUT_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
             )
-            val bufferSize = Math.max(minBufferSize, SPEAKER_SAMPLE_RATE * 2)
+            // Keep buffer compact for low-latency voice start
+            val bufferSize = maxOf(minBufferSize, SPEAKER_SAMPLE_RATE / 4)
 
             val attributes = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -80,6 +96,30 @@ class AudioEngine(private val context: Context) {
         }
     }
 
+    fun isMicBlockedByAi(): Boolean {
+        return isSpeaking || isAiTurnActive || isExternalSpeaking ||
+            System.currentTimeMillis() < micUnmuteAfterMs
+    }
+
+    fun setExternalSpeaking(speaking: Boolean) {
+        isExternalSpeaking = speaking
+        if (speaking) {
+            if (isUserSpeaking) {
+                isUserSpeaking = false
+                onUserSpeechStateChanged?.invoke(false)
+            }
+        } else {
+            micUnmuteAfterMs = System.currentTimeMillis() + AI_POST_SPEECH_COOLDOWN_MS
+        }
+    }
+
+    fun markAiTurnComplete() {
+        isAiTurnActive = false
+        if (playbackQueue.isEmpty() && isSpeaking) {
+            finishSpeakingState()
+        }
+    }
+
     fun startRecording() {
         if (isRecording) return
 
@@ -98,15 +138,26 @@ class AudioEngine(private val context: Context) {
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
             )
-            val bufferSize = Math.max(minBufferSize, CHUNK_SIZE * 4)
+            val bufferSize = maxOf(minBufferSize, CHUNK_SIZE * 4)
 
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 MIC_SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
                 bufferSize
             )
+
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                audioRecord?.release()
+                audioRecord = AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MIC_SAMPLE_RATE,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferSize
+                )
+            }
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 Log.e(TAG, "AudioRecord state not initialized")
@@ -121,13 +172,32 @@ class AudioEngine(private val context: Context) {
                 while (isRecording) {
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
                     if (read > 0) {
+                        // Half-duplex gate: while AI is speaking or cooling down, ignore all mic audio
+                        if (isMuted || isMicBlockedByAi()) {
+                            if (isUserSpeaking) {
+                                isUserSpeaking = false
+                                onUserSpeechStateChanged?.invoke(false)
+                            }
+                            continue
+                        }
+
                         val rms = calculateRms(buffer, read)
                         onAmplitudeChanged?.invoke(rms)
 
-                        if (!isMuted && !isSpeaking) {
-                            val base64 = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP)
-                            onAudioChunkRecorded?.invoke(base64)
+                        val now = System.currentTimeMillis()
+                        if (rms >= USER_SPEECH_RMS_THRESHOLD) {
+                            lastUserSpeechAtMs = now
+                            if (!isUserSpeaking) {
+                                isUserSpeaking = true
+                                onUserSpeechStateChanged?.invoke(true)
+                            }
+                        } else if (isUserSpeaking && (now - lastUserSpeechAtMs) >= USER_SPEECH_END_MS) {
+                            isUserSpeaking = false
+                            onUserSpeechStateChanged?.invoke(false)
                         }
+
+                        val base64 = Base64.encodeToString(buffer, 0, read, Base64.NO_WRAP)
+                        onAudioChunkRecorded?.invoke(base64)
                     }
                 }
             }
@@ -139,6 +209,7 @@ class AudioEngine(private val context: Context) {
 
     fun stopRecording() {
         isRecording = false
+        isUserSpeaking = false
         try {
             audioRecord?.stop()
             audioRecord?.release()
@@ -154,44 +225,70 @@ class AudioEngine(private val context: Context) {
 
         playbackThread = thread(name = "AudioPlaybackThread") {
             while (isPlaying) {
-                val chunk = playbackQueue.poll()
-                if (chunk != null) {
-                    if (!isSpeaking) {
-                        isSpeaking = true
-                        onSpeakingStarted?.invoke()
-                    }
+                try {
+                    val chunk = playbackQueue.poll(40, TimeUnit.MILLISECONDS)
+                    if (chunk != null) {
+                        // Do not talk over the user if user hasn't finished speaking yet
+                        if (!isSpeaking && isUserSpeaking) {
+                            var waitedMs = 0L
+                            while (isPlaying && isUserSpeaking && waitedMs < 2000L) {
+                                Thread.sleep(50)
+                                waitedMs += 50L
+                            }
+                        }
 
-                    val rms = calculateRms(chunk, chunk.size)
-                    onAmplitudeChanged?.invoke(rms)
+                        if (!isSpeaking) {
+                            isSpeaking = true
+                            if (isUserSpeaking) {
+                                isUserSpeaking = false
+                                onUserSpeechStateChanged?.invoke(false)
+                            }
+                            onSpeakingStarted?.invoke()
+                        }
 
-                    audioTrack?.write(chunk, 0, chunk.size)
-                } else {
-                    if (isSpeaking) {
-                        isSpeaking = false
-                        onSpeakingStopped?.invoke()
+                        val rms = calculateRms(chunk, chunk.size)
+                        onAmplitudeChanged?.invoke(rms)
+
+                        audioTrack?.write(chunk, 0, chunk.size)
+                    } else if (isSpeaking) {
+                        val elapsedSinceLastChunk = System.currentTimeMillis() - lastAudioQueuedAtMs
+                        if (!isAiTurnActive || elapsedSinceLastChunk >= CHUNK_GAP_GRACE_MS) {
+                            if (playbackQueue.isEmpty() && (!isAiTurnActive || elapsedSinceLastChunk >= CHUNK_GAP_GRACE_MS)) {
+                                finishSpeakingState()
+                            }
+                        }
                     }
-                    try {
-                        Thread.sleep(10)
-                    } catch (_: InterruptedException) {
-                        break
-                    }
+                } catch (_: InterruptedException) {
+                    break
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in playback loop: ${e.message}", e)
                 }
             }
         }
     }
 
+    private fun finishSpeakingState() {
+        if (!isSpeaking && !isAiTurnActive) return
+        isSpeaking = false
+        isAiTurnActive = false
+        micUnmuteAfterMs = System.currentTimeMillis() + AI_POST_SPEECH_COOLDOWN_MS
+        onSpeakingStopped?.invoke()
+    }
+
     fun stopPlayback() {
         isPlaying = false
+        isAiTurnActive = false
         playbackQueue.clear()
         if (isSpeaking) {
-            isSpeaking = false
-            onSpeakingStopped?.invoke()
+            finishSpeakingState()
         }
     }
 
     fun queueAudio(pcmData: ByteArray) {
         if (pcmData.isNotEmpty()) {
-            playbackQueue.add(pcmData)
+            lastAudioQueuedAtMs = System.currentTimeMillis()
+            isAiTurnActive = true
+            playbackQueue.offer(pcmData)
             if (!isPlaying) {
                 startPlayback()
             }
@@ -199,10 +296,10 @@ class AudioEngine(private val context: Context) {
     }
 
     fun clearPlaybackQueue() {
+        isAiTurnActive = false
         playbackQueue.clear()
         if (isSpeaking) {
-            isSpeaking = false
-            onSpeakingStopped?.invoke()
+            finishSpeakingState()
         }
     }
 
