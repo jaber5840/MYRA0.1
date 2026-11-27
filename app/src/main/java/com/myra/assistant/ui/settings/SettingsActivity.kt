@@ -2,6 +2,8 @@ package com.myra.assistant.ui.settings
 
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Toast
@@ -88,6 +90,13 @@ class SettingsActivity : AppCompatActivity() {
                 onOpenAccessibilityClick = {
                     startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                 },
+                onOpenOverlayClick = {
+                    val overlayIntent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                    startActivity(overlayIntent)
+                },
                 onCheckUpdatesClick = {
                     checkForUpdatesManually()
                 },
@@ -106,7 +115,8 @@ class SettingsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         uiState = uiState.copy(
-            isAccessibilityEnabled = AccessibilityHelperService.isEnabled(this)
+            isAccessibilityEnabled = AccessibilityHelperService.isEnabled(this),
+            isOverlayEnabled = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this)
         )
     }
 
@@ -155,6 +165,7 @@ class SettingsActivity : AppCompatActivity() {
             languageMode = prefs.getString("language_mode", "Banglish") ?: "Banglish",
             primeContacts = savedContacts,
             isAccessibilityEnabled = AccessibilityHelperService.isEnabled(this),
+            isOverlayEnabled = Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this),
             appVersion = BuildConfig.VERSION_NAME,
             updateServiceStatus = RemoteConfigUpdateManager.getCurrentRemoteSummary()
         )

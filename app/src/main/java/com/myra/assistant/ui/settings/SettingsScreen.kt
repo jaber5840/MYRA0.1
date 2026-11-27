@@ -111,6 +111,7 @@ fun MyraSettingsScreen(
     onDeletePrimeContact: (Int) -> Unit,
     onTestApiClick: () -> Unit,
     onOpenAccessibilityClick: () -> Unit,
+    onOpenOverlayClick: () -> Unit,
     onCheckUpdatesClick: () -> Unit,
     onSaveClick: () -> Unit,
     onCloseClick: () -> Unit
@@ -216,7 +217,8 @@ fun MyraSettingsScreen(
                             )
                             SettingsCategory.SYSTEM_PERMISSIONS -> SystemPermissionsCategory(
                                 state = state,
-                                onOpenAccessibilityClick = onOpenAccessibilityClick
+                                onOpenAccessibilityClick = onOpenAccessibilityClick,
+                                onOpenOverlayClick = onOpenOverlayClick
                             )
                             SettingsCategory.APP_UPDATES -> AppUpdatesCategory(
                                 state = state,
@@ -699,13 +701,46 @@ private fun ProfileAndContactsCategory(
 @Composable
 private fun SystemPermissionsCategory(
     state: SettingsUiState,
-    onOpenAccessibilityClick: () -> Unit
+    onOpenAccessibilityClick: () -> Unit,
+    onOpenOverlayClick: () -> Unit
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        item {
+            SettingsSectionCard(title = "FLOATING SIRI ORB (DISPLAY OVER APPS)") {
+                Text(
+                    text = if (state.isOverlayEnabled) "Status: ACTIVE" else "Status: DISABLED",
+                    color = if (state.isOverlayEnabled) MyraSuccess else MyraCrimson,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 14.sp
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Allows MYRA's glowing JARVIS/Siri orb to float on screen when you exit the app while AI is running.",
+                    color = MyraTextSecondary,
+                    fontSize = 13.sp
+                )
+                Spacer(modifier = Modifier.height(14.dp))
+                OutlinedButton(
+                    onClick = onOpenOverlayClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                        .testTag("open_overlay_permission_button"),
+                    border = BorderStroke(1.dp, MyraCrimson),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Text(
+                        text = if (state.isOverlayEnabled) "MANAGE OVERLAY PERMISSION" else "ENABLE FLOATING ORB",
+                        color = MyraCrimson,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
         item {
             SettingsSectionCard(title = "ACCESSIBILITY SERVICE") {
                 Text(

@@ -4,15 +4,21 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.DashPathEffect
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
+import android.graphics.RectF
 import android.graphics.Shader
+import android.graphics.SweepGradient
 import android.util.AttributeSet
 import android.view.View
 import android.view.animation.LinearInterpolator
+import kotlin.math.PI
 import kotlin.math.cos
+import kotlin.math.min
 import kotlin.math.sin
 
 class OrbAnimationView @JvmOverloads constructor(
@@ -28,87 +34,94 @@ class OrbAnimationView @JvmOverloads constructor(
     private var currentState = State.IDLE
 
     private val paintGlow = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val paintCore = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val paintRing = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE
-        strokeWidth = 3f
+    private val paintGlassBody = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val paintBlob = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.ADD)
     }
-    private val paintWave = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val paintFresnel = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 4f
     }
-    private val paintThinking = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    private val paintGyro = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
-        strokeWidth = 6f
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.ADD)
+    }
+    private val paintHudArc = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
     }
-    private val paintParticle = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val paintTick = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+    }
+    private val paintRipple = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+    }
     private val paintHighlight = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    private var scaleFactor = 1.0f
-    private var rotationAngle = 0f
-    private var waveOffset = 0f
-    private var thinkingAngle = 0f
-    private var glowAlpha = 180
+    private val spherePath = Path()
+    private val ovalRect = RectF()
+    private val sweepMatrix = Matrix()
 
-    var amplitude = 0.2f
+    private var phase = 0f
+    private var breathe = 0f
+    private var rippleProgress = 0f
+
+    var amplitude = 0.15f
         set(value) {
-            field = value.coerceIn(0.1f, 1.0f)
+            val clamped = value.coerceIn(0.05f, 1.0f)
+            field += (clamped - field) * 0.35f
             invalidate()
         }
 
-    private val pulseAnimator = ValueAnimator.ofFloat(1.0f, 1.15f, 1.0f).apply {
-        duration = 1500
-        repeatCount = ValueAnimator.INFINITE
-        addUpdateListener {
-            scaleFactor = it.animatedValue as Float
-            glowAlpha = (120 + (scaleFactor - 1.0f) * 660).toInt().coerceIn(100, 255)
-            invalidate()
-        }
-    }
-
-    private val rotationAnimator = ValueAnimator.ofFloat(0f, 360f).apply {
-        duration = 4000
+    private val spinAnimator = ValueAnimator.ofFloat(0f, 360f).apply {
+        duration = 9000L
         repeatCount = ValueAnimator.INFINITE
         interpolator = LinearInterpolator()
         addUpdateListener {
-            rotationAngle = it.animatedValue as Float
-            waveOffset += 0.15f
-            thinkingAngle = (thinkingAngle + 4f) % 360f
+            phase = it.animatedValue as Float
             invalidate()
         }
     }
 
-    private val particles = List(12) { i ->
-        Particle(
-            angle = (i * 30).toFloat(),
-            distanceFactor = 0.8f + (i % 3) * 0.15f,
-            speed = 1.0f + (i % 4) * 0.5f,
-            size = 4f + (i % 3) * 2f
-        )
+    private val breatheAnimator = ValueAnimator.ofFloat(0f, (2f * PI).toFloat()).apply {
+        duration = 3200L
+        repeatCount = ValueAnimator.INFINITE
+        interpolator = LinearInterpolator()
+        addUpdateListener {
+            breathe = it.animatedValue as Float
+        }
+    }
+
+    private val rippleAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+        duration = 1800L
+        repeatCount = ValueAnimator.INFINITE
+        interpolator = LinearInterpolator()
+        addUpdateListener {
+            rippleProgress = it.animatedValue as Float
+        }
     }
 
     init {
-        pulseAnimator.start()
-        rotationAnimator.start()
+        setLayerType(LAYER_TYPE_HARDWARE, null)
+        spinAnimator.start()
+        breatheAnimator.start()
+        rippleAnimator.start()
     }
 
     fun setState(state: State) {
         if (currentState != state) {
             currentState = state
-            when (state) {
-                State.IDLE -> {
-                    pulseAnimator.duration = 1800
-                }
-                State.LISTENING -> {
-                    pulseAnimator.duration = 1000
-                }
-                State.SPEAKING -> {
-                    pulseAnimator.duration = 800
-                }
-                State.THINKING -> {
-                    pulseAnimator.duration = 1200
-                }
+            spinAnimator.duration = when (state) {
+                State.IDLE -> 11000L
+                State.LISTENING -> 6500L
+                State.THINKING -> 4200L
+                State.SPEAKING -> 5000L
+            }
+            rippleAnimator.duration = when (state) {
+                State.SPEAKING -> 1100L
+                State.LISTENING -> 1400L
+                State.THINKING -> 1600L
+                State.IDLE -> 2600L
             }
             invalidate()
         }
@@ -117,111 +130,265 @@ class OrbAnimationView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        val cx = width / 2f
-        val cy = height / 2f
-        val baseRadius = Math.min(cx, cy) * 0.55f
-        val radius = baseRadius * scaleFactor
+        val w = width.toFloat()
+        val h = height.toFloat()
+        val cx = w / 2f
+        val cy = h / 2f
+        val minDim = min(w, h)
+        if (minDim <= 0f) return
 
-        if (radius <= 0) return
+        val isVoiceActive = currentState == State.SPEAKING || currentState == State.LISTENING
+        val voiceBoost = if (isVoiceActive) amplitude else 0.08f
+        val pulse = 1f + sin(breathe) * 0.025f + voiceBoost * 0.055f
 
-        val (colorStart, colorEnd) = when (currentState) {
-            State.IDLE -> Color.parseColor("#B71C1C") to Color.parseColor("#880E4F")
-            State.LISTENING -> Color.parseColor("#FF1744") to Color.parseColor("#D500F9")
-            State.SPEAKING -> Color.parseColor("#E040FB") to Color.parseColor("#FF1744")
-            State.THINKING -> Color.parseColor("#40C4FF") to Color.parseColor("#00B0FF")
+        val sphereR = minDim * 0.285f * pulse
+        val outerHudR = minDim * 0.41f
+        val midHudR = minDim * 0.355f
+
+        // Harmonious palette per state (primary glow, secondary aurora, core highlight)
+        val (c1, c2, c3) = when (currentState) {
+            State.IDLE -> Triple(
+                Color.parseColor("#FF1744"), // Crimson
+                Color.parseColor("#FF4081"), // Luminous Rose
+                Color.parseColor("#FF80AB")  // Soft Pearl Rose
+            )
+            State.LISTENING -> Triple(
+                Color.parseColor("#FF1744"), // Electric Crimson
+                Color.parseColor("#D500F9"), // Neon Magenta
+                Color.parseColor("#40C4FF")  // Subtle Cyan Spark
+            )
+            State.THINKING -> Triple(
+                Color.parseColor("#00E5FF"), // JARVIS Hologram Cyan
+                Color.parseColor("#2979FF"), // Sapphire Blue
+                Color.parseColor("#B388FF")  // Neural Violet
+            )
+            State.SPEAKING -> Triple(
+                Color.parseColor("#FF1744"), // Crimson
+                Color.parseColor("#E040FB"), // Siri Violet
+                Color.parseColor("#00E5FF")  // Siri Cyan Shimmer
+            )
         }
 
-        // 1. Radial Glow Layer
+        // 1. Soft Seamless Outer Ambient Glow
+        val haloR = minDim * 0.49f
+        val haloAlpha = (95 + voiceBoost * 95).toInt().coerceIn(75, 195)
         paintGlow.shader = RadialGradient(
-            cx, cy, radius * 1.6f,
-            intArrayOf(adjustAlpha(colorStart, glowAlpha), Color.TRANSPARENT),
-            floatArrayOf(0.4f, 1.0f),
+            cx, cy, haloR,
+            intArrayOf(
+                adjustAlpha(c1, haloAlpha),
+                adjustAlpha(c2, (haloAlpha * 0.45f).toInt()),
+                Color.TRANSPARENT
+            ),
+            floatArrayOf(0.25f, 0.62f, 1.0f),
             Shader.TileMode.CLAMP
         )
-        canvas.drawCircle(cx, cy, radius * 1.6f, paintGlow)
+        canvas.drawCircle(cx, cy, haloR, paintGlow)
 
-        // 2. Core Orb Sphere
-        paintCore.shader = RadialGradient(
-            cx - radius * 0.3f, cy - radius * 0.3f, radius * 1.2f,
-            intArrayOf(colorStart, colorEnd, Color.parseColor("#050505")),
-            floatArrayOf(0.0f, 0.7f, 1.0f),
+        // 2. Expanding Sound-Wave Ripple (subtle when idle, vivid when listening/speaking)
+        val rippleR = sphereR * (1.06f + rippleProgress * 0.46f)
+        val rippleFade = ((1f - rippleProgress) * (if (isVoiceActive) 135f * (0.4f + voiceBoost) else 45f))
+            .toInt().coerceIn(0, 180)
+        paintRipple.strokeWidth = maxOf(1.2f, minDim * 0.005f)
+        paintRipple.color = adjustAlpha(c2, rippleFade)
+        canvas.drawCircle(cx, cy, rippleR, paintRipple)
+
+        // 3. Delicate Calibrated JARVIS Outer Ring & Hairline Ticks
+        paintTick.strokeWidth = maxOf(0.9f, minDim * 0.003f)
+        paintTick.color = adjustAlpha(c3, if (currentState == State.IDLE) 45 else 85)
+        canvas.drawCircle(cx, cy, outerHudR, paintTick)
+
+        val tickCount = 48
+        for (i in 0 until tickCount) {
+            val isMajor = i % 4 == 0
+            if (!isMajor && minDim < 280f) continue // Keep small floating overlay crisp
+            val deg = i * (360f / tickCount) + phase * 0.25f
+            val rad = Math.toRadians(deg.toDouble())
+            val rIn = if (isMajor) outerHudR - minDim * 0.022f else outerHudR - minDim * 0.011f
+            paintTick.color = adjustAlpha(
+                if (isMajor) c3 else c1,
+                if (isMajor) (if (currentState == State.IDLE) 95 else 175) else 55
+            )
+            canvas.drawLine(
+                (cx + rIn * cos(rad)).toFloat(),
+                (cy + rIn * sin(rad)).toFloat(),
+                (cx + outerHudR * cos(rad)).toFloat(),
+                (cy + outerHudR * sin(rad)).toFloat(),
+                paintTick
+            )
+        }
+
+        // 4. Signature JARVIS Gradient-Tail Scanner Arcs
+        drawGradientTailArc(
+            canvas, cx, cy, midHudR,
+            rotationDeg = phase * 1.4f,
+            color = c1,
+            strokeW = maxOf(1.8f, minDim * 0.0085f),
+            alpha = if (currentState == State.IDLE) 150 else 235
+        )
+        drawGradientTailArc(
+            canvas, cx, cy, midHudR * 0.91f,
+            rotationDeg = -phase * 1.9f + 135f,
+            color = c3,
+            strokeW = maxOf(1.4f, minDim * 0.0065f),
+            alpha = if (currentState == State.IDLE) 125 else 215
+        )
+
+        // 5. Volumetric Dark Obsidian Glass Sphere + Internal Siri Aurora Plasma
+        paintGlassBody.shader = RadialGradient(
+            cx, cy, sphereR,
+            intArrayOf(
+                Color.parseColor("#1A0A16"),
+                Color.parseColor("#0D0712"),
+                Color.parseColor("#05040A")
+            ),
+            floatArrayOf(0.0f, 0.72f, 1.0f),
             Shader.TileMode.CLAMP
         )
-        canvas.drawCircle(cx, cy, radius, paintCore)
+        canvas.drawCircle(cx, cy, sphereR, paintGlassBody)
 
-        // 3. Rotating Rings (3 dashed arcs)
-        paintRing.color = colorStart
-        paintRing.pathEffect = DashPathEffect(floatArrayOf(30f, 20f), 0f)
-        for (i in 1..3) {
-            val ringRadius = radius * (1.1f + i * 0.15f)
+        // Clip inside glass sphere for fluid liquid-light aurora blobs
+        spherePath.reset()
+        spherePath.addCircle(cx, cy, sphereR * 0.985f, Path.Direction.CW)
+        canvas.save()
+        canvas.clipPath(spherePath)
+
+        val angle1 = Math.toRadians((phase * 1.5f).toDouble())
+        val angle2 = Math.toRadians((-phase * 1.2f + 120f).toDouble())
+        val angle3 = Math.toRadians((phase * 0.9f + 240f).toDouble())
+
+        val orbitDist = sphereR * (0.28f + voiceBoost * 0.10f)
+        drawAuroraBlob(
+            canvas,
+            cx + (orbitDist * cos(angle1)).toFloat(),
+            cy + (orbitDist * sin(angle1)).toFloat(),
+            sphereR * (0.95f + voiceBoost * 0.22f),
+            c1,
+            (185 + voiceBoost * 65).toInt().coerceIn(160, 245)
+        )
+        drawAuroraBlob(
+            canvas,
+            cx + (orbitDist * cos(angle2)).toFloat(),
+            cy + (orbitDist * sin(angle2)).toFloat(),
+            sphereR * (0.88f + voiceBoost * 0.20f),
+            c2,
+            (175 + voiceBoost * 65).toInt().coerceIn(150, 240)
+        )
+        drawAuroraBlob(
+            canvas,
+            cx + (orbitDist * 0.85f * cos(angle3)).toFloat(),
+            cy + (orbitDist * 0.85f * sin(angle3)).toFloat(),
+            sphereR * (0.78f + voiceBoost * 0.18f),
+            c3,
+            (145 + voiceBoost * 75).toInt().coerceIn(120, 225)
+        )
+
+        // Delicate JARVIS Atomic / Gyro Core Iris inside the translucent orb
+        paintGyro.strokeWidth = maxOf(1.0f, minDim * 0.0042f)
+        val rx = sphereR * (0.72f + voiceBoost * 0.08f)
+        val ry = sphereR * (0.28f + voiceBoost * 0.14f)
+        ovalRect.set(cx - rx, cy - ry, cx + rx, cy + ry)
+
+        val gyroAlpha = if (currentState == State.IDLE) 95 else 165
+        val tiltColors = intArrayOf(c3, c2, c1)
+        for (k in 0 until 3) {
+            paintGyro.color = adjustAlpha(tiltColors[k], gyroAlpha)
             canvas.save()
-            val speedDir = if (i % 2 == 0) 1f else -1f
-            canvas.rotate(rotationAngle * speedDir * (1 + i * 0.3f), cx, cy)
-            canvas.drawCircle(cx, cy, ringRadius, paintRing)
+            canvas.rotate(k * 60f + phase * (if (k % 2 == 0) 0.9f else -0.7f), cx, cy)
+            canvas.drawOval(ovalRect, paintGyro)
             canvas.restore()
         }
 
-        // 4. Wave Rings (sine wave around perimeter)
-        if (currentState == State.LISTENING || currentState == State.SPEAKING) {
-            paintWave.color = colorEnd
-            val path = Path()
-            val points = 72
-            for (p in 0..points) {
-                val angle = (p.toFloat() / points) * 2 * Math.PI
-                val waveComp = sin(angle * 6 + waveOffset) * (8f + amplitude * 20f)
-                val r = radius * 1.08f + waveComp
-                val px = (cx + r * cos(angle)).toFloat()
-                val py = (cy + r * sin(angle)).toFloat()
-                if (p == 0) path.moveTo(px, py) else path.lineTo(px, py)
-            }
-            path.close()
-            canvas.drawPath(path, paintWave)
-        }
+        // Luminous hot neural center pinpoint
+        paintGlow.shader = RadialGradient(
+            cx, cy, sphereR * 0.34f,
+            intArrayOf(
+                Color.argb((190 + voiceBoost * 65).toInt().coerceIn(170, 255), 255, 255, 255),
+                adjustAlpha(c3, 140),
+                Color.TRANSPARENT
+            ),
+            floatArrayOf(0f, 0.45f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawCircle(cx, cy, sphereR * 0.34f, paintGlow)
 
-        // 5. Thinking Arc
-        if (currentState == State.THINKING) {
-            paintThinking.color = Color.parseColor("#40C4FF")
-            val arcRadius = radius * 1.25f
-            canvas.drawArc(
-                cx - arcRadius, cy - arcRadius, cx + arcRadius, cy + arcRadius,
-                thinkingAngle, 80f, false, paintThinking
-            )
-            canvas.drawArc(
-                cx - arcRadius, cy - arcRadius, cx + arcRadius, cy + arcRadius,
-                thinkingAngle + 180f, 80f, false, paintThinking
-            )
-        }
-
-        // 6. Particles (orbiting dots)
-        if (currentState == State.SPEAKING || currentState == State.LISTENING) {
-            paintParticle.color = colorStart
-            for (p in particles) {
-                val pAngle = Math.toRadians((p.angle + rotationAngle * p.speed).toDouble())
-                val pDist = radius * p.distanceFactor * (1f + amplitude * 0.2f)
-                val px = (cx + pDist * cos(pAngle)).toFloat()
-                val py = (cy + pDist * sin(pAngle)).toFloat()
-                canvas.drawCircle(px, py, p.size, paintParticle)
-            }
-        }
-
-        // 7. Inner Highlight
+        // Subtle curved top-left glass specular sheen (luxury 3D lens look)
         paintHighlight.shader = RadialGradient(
-            cx - radius * 0.35f, cy - radius * 0.35f, radius * 0.4f,
-            intArrayOf(Color.WHITE, Color.TRANSPARENT),
+            cx - sphereR * 0.32f, cy - sphereR * 0.36f, sphereR * 0.62f,
+            intArrayOf(Color.argb(95, 255, 255, 255), Color.TRANSPARENT),
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP
         )
-        canvas.drawCircle(cx - radius * 0.2f, cy - radius * 0.2f, radius * 0.35f, paintHighlight)
+        canvas.drawCircle(cx - sphereR * 0.25f, cy - sphereR * 0.28f, sphereR * 0.56f, paintHighlight)
+
+        canvas.restore()
+
+        // 6. Razor-Thin Iridescent Fresnel Glass Rim
+        paintFresnel.strokeWidth = maxOf(1.5f, minDim * 0.0075f)
+        val rimShader = SweepGradient(
+            cx, cy,
+            intArrayOf(
+                adjustAlpha(c1, 230),
+                adjustAlpha(c3, 210),
+                adjustAlpha(c2, 230),
+                adjustAlpha(c1, 230)
+            ),
+            null
+        )
+        sweepMatrix.setRotate(phase * 1.6f, cx, cy)
+        rimShader.setLocalMatrix(sweepMatrix)
+        paintFresnel.shader = rimShader
+        canvas.drawCircle(cx, cy, sphereR, paintFresnel)
+    }
+
+    private fun drawGradientTailArc(
+        canvas: Canvas,
+        cx: Float,
+        cy: Float,
+        radius: Float,
+        rotationDeg: Float,
+        color: Int,
+        strokeW: Float,
+        alpha: Int
+    ) {
+        paintHudArc.strokeWidth = strokeW
+        val shader = SweepGradient(
+            cx, cy,
+            intArrayOf(
+                Color.TRANSPARENT,
+                adjustAlpha(color, (alpha * 0.35f).toInt()),
+                adjustAlpha(color, alpha),
+                Color.TRANSPARENT
+            ),
+            floatArrayOf(0.0f, 0.22f, 0.36f, 0.40f)
+        )
+        sweepMatrix.setRotate(rotationDeg, cx, cy)
+        shader.setLocalMatrix(sweepMatrix)
+        paintHudArc.shader = shader
+        canvas.drawCircle(cx, cy, radius, paintHudArc)
+    }
+
+    private fun drawAuroraBlob(
+        canvas: Canvas,
+        bx: Float,
+        by: Float,
+        radius: Float,
+        color: Int,
+        alpha: Int
+    ) {
+        paintBlob.shader = RadialGradient(
+            bx, by, radius,
+            intArrayOf(
+                adjustAlpha(color, alpha),
+                adjustAlpha(color, (alpha * 0.45f).toInt()),
+                Color.TRANSPARENT
+            ),
+            floatArrayOf(0.0f, 0.52f, 1.0f),
+            Shader.TileMode.CLAMP
+        )
+        canvas.drawCircle(bx, by, radius, paintBlob)
     }
 
     private fun adjustAlpha(color: Int, alpha: Int): Int {
-        return (color and 0x00FFFFFF) or ((alpha and 0xFF) shl 24)
+        return (color and 0x00FFFFFF) or ((alpha.coerceIn(0, 255) and 0xFF) shl 24)
     }
-
-    private data class Particle(
-        val angle: Float,
-        val distanceFactor: Float,
-        val speed: Float,
-        val size: Float
-    )
 }

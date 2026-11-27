@@ -1,39 +1,46 @@
 package com.myra.assistant.ui.main
 
 import android.Manifest
-import android.animation.ValueAnimator
 import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
 import android.widget.Toast
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import androidx.recyclerview.widget.LinearLayoutManager
 import com.myra.assistant.BuildConfig
-import com.myra.assistant.R
-import com.myra.assistant.databinding.ActivityMainBinding
 import com.myra.assistant.service.CallMonitorService
+import com.myra.assistant.service.MyraOverlayService
 import com.myra.assistant.service.MyraVoiceService
 import com.myra.assistant.service.MyraVoiceSession
 import com.myra.assistant.ui.settings.SettingsActivity
+import com.myra.assistant.ui.theme.MyraTheme
 import com.myra.assistant.update.GitHubUpdateChecker
 import com.myra.assistant.update.RemoteConfigUpdateManager
 import com.myra.assistant.update.UpdateDialogHelper
@@ -49,15 +56,13 @@ class MainActivity : AppCompatActivity() {
         private const val TAG = "MainActivity"
     }
 
-    private lateinit var binding: ActivityMainBinding
     private val viewModel: MainViewModel by viewModels()
-
     private var speechRecognizer: SpeechRecognizer? = null
-    private val chatAdapter = ChatAdapter()
-
     private var pendingStartAfterPermission = false
-    private var lastRedOverlayState = false
+    private var navigatingToSettings = false
+    private var overlayPromptShownThisRun = false
 
+    private val telemetryState = mutableStateOf(HomeTelemetryState())
     private val handler = Handler(Looper.getMainLooper())
 
     private val statusUpdateRunnable = object : Runnable {
@@ -101,12 +106,65 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT)
+        )
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
 
-        setupUI()
-        observeVoiceSession()
+        updateSystemStatus()
+
+        setContent {
+            MyraTheme {
+                val isRunning by MyraVoiceSession.isRunning.collectAsStateWithLifecycle()
+                val isMuted by MyraVoiceSession.isMuted.collectAsStateWithLifecycle()
+                val isSpeaking by MyraVoiceSession.isSpeaking.collectAsStateWithLifecycle()
+                val orbState by MyraVoiceSession.orbState.collectAsStateWithLifecycle()
+                val statusText by MyraVoiceSession.statusText.collectAsStateWithLifecycle()
+                val amplitude by MyraVoiceSession.amplitude.collectAsStateWithLifecycle()
+                val messages by MyraVoiceSession.messages.collectAsStateWithLifecycle()
+                val telemetry by telemetryState
+
+                HomeScreen(
+                    isRunning = isRunning,
+                    isMuted = isMuted,
+                    isSpeaking = isSpeaking,
+                    orbState = orbState,
+                    statusText = statusText,
+                    amplitude = amplitude,
+                    messages = messages,
+                    telemetry = telemetry,
+                    onStartStopClick = {
+                        if (MyraVoiceSession.isRunning.value) {
+                            stopAiAssistant()
+                        } else {
+                            startAiAssistant()
+                        }
+                    },
+                    onMicClick = {
+                        if (!MyraVoiceSession.isRunning.value) {
+                            startAiAssistant()
+                        } else {
+                            toggleMute()
+                        }
+                    },
+                    onMicLongPress = {
+                        interruptMyra()
+                    },
+                    onOrbClick = {
+                        if (!MyraVoiceSession.isRunning.value) {
+                            startAiAssistant()
+                        }
+                    },
+                    onSettingsClick = {
+                        navigatingToSettings = true
+                        startActivity(Intent(this@MainActivity, SettingsActivity::class.java))
+                    }
+                )
+            }
+        }
+
+        observeSessionErrors()
         checkAndRequestPermissions(autoStart = false)
         startStatusUpdates()
 
@@ -131,55 +189,11 @@ class MainActivity : AppCompatActivity() {
         checkForAppUpdateOnLaunch()
     }
 
-    private fun observeVoiceSession() {
+    private fun observeSessionErrors() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                launch {
-                    MyraVoiceSession.isRunning.collect { running ->
-                        updateControlButtons(running, MyraVoiceSession.isMuted.value)
-                    }
-                }
-                launch {
-                    MyraVoiceSession.isMuted.collect { muted ->
-                        updateControlButtons(MyraVoiceSession.isRunning.value, muted)
-                    }
-                }
-                launch {
-                    MyraVoiceSession.isSpeaking.collect { speaking ->
-                        if (speaking != lastRedOverlayState) {
-                            lastRedOverlayState = speaking
-                            animateRedOverlay(speaking)
-                        }
-                    }
-                }
-                launch {
-                    MyraVoiceSession.orbState.collect { state ->
-                        binding.orbView.setState(state)
-                    }
-                }
-                launch {
-                    MyraVoiceSession.statusText.collect { text ->
-                        binding.statusText.text = text
-                    }
-                }
-                launch {
-                    MyraVoiceSession.amplitude.collect { amp ->
-                        binding.waveformView.setAmplitude(amp)
-                        binding.orbView.amplitude = amp
-                    }
-                }
-                launch {
-                    MyraVoiceSession.messages.collect { messages ->
-                        chatAdapter.submitMessages(messages)
-                        if (messages.isNotEmpty()) {
-                            binding.chatRecycler.smoothScrollToPosition(messages.size - 1)
-                        }
-                    }
-                }
-                launch {
-                    MyraVoiceSession.errorEvents.collect { err ->
-                        Toast.makeText(this@MainActivity, err, Toast.LENGTH_LONG).show()
-                    }
+                MyraVoiceSession.errorEvents.collect { err ->
+                    Toast.makeText(this@MainActivity, err, Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -214,64 +228,6 @@ class MainActivity : AppCompatActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleIncomingCallIntent(intent)
-    }
-
-    private fun setupUI() {
-        binding.chatRecycler.layoutManager = LinearLayoutManager(this).apply {
-            stackFromEnd = true
-        }
-        binding.chatRecycler.adapter = chatAdapter
-
-        binding.settingsBtn.setOnClickListener {
-            startActivity(Intent(this, SettingsActivity::class.java))
-        }
-
-        binding.startStopBtn.setOnClickListener {
-            if (MyraVoiceSession.isRunning.value) {
-                stopAiAssistant()
-            } else {
-                startAiAssistant()
-            }
-        }
-
-        binding.orbView.setOnClickListener {
-            if (!MyraVoiceSession.isRunning.value) {
-                startAiAssistant()
-            }
-        }
-
-        binding.micButton.setOnClickListener {
-            if (!MyraVoiceSession.isRunning.value) {
-                startAiAssistant()
-            } else {
-                toggleMute()
-            }
-        }
-
-        binding.micButton.setOnLongClickListener {
-            interruptMyra()
-            true
-        }
-
-        updateControlButtons(MyraVoiceSession.isRunning.value, MyraVoiceSession.isMuted.value)
-    }
-
-    private fun updateControlButtons(isAiRunning: Boolean, isMuted: Boolean) {
-        if (isAiRunning) {
-            binding.startStopBtn.text = "STOP"
-            binding.startStopBtn.setIconResource(android.R.drawable.ic_media_pause)
-            binding.startStopBtn.backgroundTintList = android.content.res.ColorStateList.valueOf(
-                android.graphics.Color.parseColor("#880E4F")
-            )
-            binding.micButton.setImageResource(if (isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic_on)
-        } else {
-            binding.startStopBtn.text = "START"
-            binding.startStopBtn.setIconResource(android.R.drawable.ic_media_play)
-            binding.startStopBtn.backgroundTintList = android.content.res.ColorStateList.valueOf(
-                android.graphics.Color.parseColor("#FF1744")
-            )
-            binding.micButton.setImageResource(R.drawable.ic_mic_off)
-        }
     }
 
     private fun checkAndRequestPermissions(autoStart: Boolean) {
@@ -360,6 +316,30 @@ class MainActivity : AppCompatActivity() {
             action = MyraVoiceService.ACTION_START
         }
         ContextCompat.startForegroundService(this, intent)
+
+        maybePromptOverlayPermission()
+    }
+
+    private fun maybePromptOverlayPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(this)) {
+            val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+            if (overlayPromptShownThisRun || prefs.getBoolean("overlay_prompt_dismissed", false)) return
+            overlayPromptShownThisRun = true
+            AlertDialog.Builder(this)
+                .setTitle("Enable Floating Siri Orb ✨")
+                .setMessage("Allow MYRA to display over other apps so the glowing JARVIS/Siri orb appears on screen when you exit the app.")
+                .setPositiveButton("ENABLE") { _, _ ->
+                    val overlayIntent = Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    )
+                    startActivity(overlayIntent)
+                }
+                .setNegativeButton("LATER") { _, _ ->
+                    prefs.edit().putBoolean("overlay_prompt_dismissed", true).apply()
+                }
+                .show()
+        }
     }
 
     private fun stopAiAssistant() {
@@ -457,17 +437,6 @@ class MainActivity : AppCompatActivity() {
         speechRecognizer?.startListening(recognizerIntent)
     }
 
-    private fun animateRedOverlay(show: Boolean) {
-        val targetAlpha = if (show) 0.08f else 0f
-        ValueAnimator.ofFloat(binding.redOverlay.alpha, targetAlpha).apply {
-            duration = if (show) 300L else 500L
-            addUpdateListener {
-                binding.redOverlay.alpha = it.animatedValue as Float
-            }
-            start()
-        }
-    }
-
     private fun startStatusUpdates() {
         handler.post(statusUpdateRunnable)
     }
@@ -475,17 +444,38 @@ class MainActivity : AppCompatActivity() {
     private fun updateSystemStatus() {
         val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
         val batLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
-        binding.batteryText.text = "$batLevel%"
 
         val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val memInfo = ActivityManager.MemoryInfo()
         am.getMemoryInfo(memInfo)
         val usedMem = memInfo.totalMem - memInfo.availMem
-        val ramPercent = ((usedMem.toDouble() / memInfo.totalMem) * 100).toInt()
-        binding.ramText.text = "RAM: $ramPercent%"
+        val ramPercent = if (memInfo.totalMem > 0L) {
+            ((usedMem.toDouble() / memInfo.totalMem) * 100).toInt()
+        } else 0
 
         val timeStr = SimpleDateFormat("hh:mm a", Locale.getDefault()).format(Date())
-        binding.timeText.text = timeStr
+
+        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+        val personality = prefs.getString("personality_mode", "GF") ?: "GF"
+        val language = prefs.getString("language_mode", "Banglish") ?: "Banglish"
+        val voice = prefs.getString("gemini_voice", "Aoede") ?: "Aoede"
+
+        telemetryState.value = HomeTelemetryState(
+            batteryPercent = batLevel,
+            ramPercent = ramPercent,
+            timeText = timeStr,
+            personalityLabel = personality,
+            languageLabel = language,
+            voiceLabel = voice
+        )
+    }
+
+    override fun onStart() {
+        super.onStart()
+        navigatingToSettings = false
+        try {
+            stopService(Intent(this, MyraOverlayService::class.java))
+        } catch (_: Exception) {}
     }
 
     override fun onResume() {
@@ -493,6 +483,23 @@ class MainActivity : AppCompatActivity() {
         updateSystemStatus()
         if (MyraVoiceSession.isRunning.value) {
             sendServiceAction(MyraVoiceService.ACTION_RECONNECT_IF_CONFIG_CHANGED)
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations && !isFinishing && !navigatingToSettings &&
+            MyraVoiceSession.isRunning.value &&
+            (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || Settings.canDrawOverlays(this))
+        ) {
+            try {
+                val overlayIntent = Intent(this, MyraOverlayService::class.java).apply {
+                    action = MyraOverlayService.ACTION_SHOW_OVERLAY
+                }
+                ContextCompat.startForegroundService(this, overlayIntent)
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to show floating Siri orb: ${e.message}")
+            }
         }
     }
 

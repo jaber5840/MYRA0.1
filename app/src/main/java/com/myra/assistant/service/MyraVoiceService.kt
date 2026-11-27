@@ -190,6 +190,10 @@ class MyraVoiceService : Service() {
         MyraVoiceSession.setOrbState(OrbAnimationView.State.IDLE)
         MyraVoiceSession.setStatusText("Tap START to talk ✨")
 
+        try {
+            stopService(Intent(this, MyraOverlayService::class.java))
+        } catch (_: Exception) {}
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -535,6 +539,9 @@ class MyraVoiceService : Service() {
         MyraVoiceSession.setMuted(true)
         MyraVoiceSession.setSpeaking(false)
         MyraVoiceSession.setOrbState(OrbAnimationView.State.IDLE)
+        try {
+            stopService(Intent(this, MyraOverlayService::class.java))
+        } catch (_: Exception) {}
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
