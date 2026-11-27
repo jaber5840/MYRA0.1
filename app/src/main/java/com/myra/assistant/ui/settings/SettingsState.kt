@@ -39,7 +39,7 @@ data class SettingsUiState(
     val primeContacts: List<PrimeContactItem> = emptyList(),
     val isAccessibilityEnabled: Boolean = false,
     val isOverlayEnabled: Boolean = false,
-    val appVersion: String = "2.2",
+    val appVersion: String = "2.3",
     val updateServiceStatus: String = "Update Service: Ready",
     val isTestingApi: Boolean = false,
     val apiTestButtonLabel: String = "TEST GEMINI API",

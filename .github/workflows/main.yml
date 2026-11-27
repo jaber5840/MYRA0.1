@@ -36,7 +36,7 @@ jobs:
             echo "app_version=$TAG_VER" >> "$GITHUB_OUTPUT"
           else
             GRADLE_VER=$(grep 'versionName =' app/build.gradle.kts | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
-            GRADLE_VER="${GRADLE_VER:-2.2}"
+            GRADLE_VER="${GRADLE_VER:-2.3}"
             echo "app_version=$GRADLE_VER" >> "$GITHUB_OUTPUT"
           fi
 

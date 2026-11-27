@@ -3,6 +3,7 @@ package com.myra.assistant.ai
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.util.Base64
 import android.util.Log
 import com.myra.assistant.BuildConfig
@@ -17,7 +18,9 @@ import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 class GeminiLiveClient(private val context: Context) {
 
@@ -37,7 +40,11 @@ class GeminiLiveClient(private val context: Context) {
         .build()
 
     private val handler = Handler(Looper.getMainLooper())
+    private val incomingMessageQueue = LinkedBlockingQueue<String>()
+    private val workerLock = Any()
+    private var wsAudioWorkerThread: Thread? = null
 
+    @Volatile private var isWorkerRunning = false
     @Volatile var isConnected = false
         private set
 
@@ -74,9 +81,10 @@ class GeminiLiveClient(private val context: Context) {
     private fun resolveActiveLiveModel(savedModel: String?): String {
         if (savedModel.isNullOrBlank()) return DEFAULT_LIVE_MODEL
         val lower = savedModel.lowercase()
-        // Migrate deprecated 2.0 or non-live text models to an active Live audio model
+        // Migrate deprecated 2.0, preview-native-audio-dialog, or non-live models to the active fast native audio model
         return if (lower.contains("2.0-flash") ||
             lower == "models/gemini-3.8-flash" ||
+            lower.contains("2.5-flash-live-preview") ||
             lower.contains("preview-native-audio-dialog")
         ) {
             DEFAULT_LIVE_MODEL
@@ -114,6 +122,8 @@ class GeminiLiveClient(private val context: Context) {
 
         val systemPrompt = buildSystemPrompt(personality, language, userName)
 
+        startAudioStreamWorker()
+
         val wsUrl = "$BASE_WS_URL?key=$apiKey"
         val request = Request.Builder().url(wsUrl).build()
 
@@ -133,12 +143,12 @@ class GeminiLiveClient(private val context: Context) {
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 if (webSocket !== this@GeminiLiveClient.webSocket) return
-                parseServerMessage(text)
+                enqueueIncomingMessage(text)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
                 if (webSocket !== this@GeminiLiveClient.webSocket) return
-                parseServerMessage(bytes.utf8())
+                enqueueIncomingMessage(bytes.utf8())
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -203,8 +213,8 @@ class GeminiLiveClient(private val context: Context) {
                         put("automatic_activity_detection", JSONObject().apply {
                             put("start_of_speech_sensitivity", "START_SENSITIVITY_HIGH")
                             put("end_of_speech_sensitivity", "END_SENSITIVITY_HIGH")
-                            put("silence_duration_ms", 260)
-                            put("prefix_padding_ms", 220)
+                            put("silence_duration_ms", 320)
+                            put("prefix_padding_ms", 240)
                         })
                     })
                     put("output_audio_transcription", JSONObject())
@@ -222,17 +232,12 @@ class GeminiLiveClient(private val context: Context) {
     fun sendAudioChunk(base64Pcm: String) {
         if (!isConnected || !isSessionReady) return
         try {
-            val chunkJson = JSONObject().apply {
-                put("realtime_input", JSONObject().apply {
-                    put("media_chunks", JSONArray().apply {
-                        put(JSONObject().apply {
-                            put("mime_type", "audio/pcm;rate=16000")
-                            put("data", base64Pcm)
-                        })
-                    })
-                })
-            }
-            webSocket?.send(chunkJson.toString())
+            val payload = StringBuilder(base64Pcm.length + 96)
+                .append("{\"realtime_input\":{\"media_chunks\":[{\"mime_type\":\"audio/pcm;rate=16000\",\"data\":\"")
+                .append(base64Pcm)
+                .append("\"}]}}")
+                .toString()
+            webSocket?.send(payload)
         } catch (e: Exception) {
             Log.e(TAG, "Error sending audio chunk: ${e.message}", e)
         }
@@ -254,6 +259,20 @@ class GeminiLiveClient(private val context: Context) {
             webSocket?.send(frameJson.toString())
         } catch (e: Exception) {
             Log.e(TAG, "Error sending screen frame: ${e.message}", e)
+        }
+    }
+
+    fun sendAudioStreamEnd() {
+        if (!isConnected || !isSessionReady) return
+        try {
+            val endJson = JSONObject().apply {
+                put("realtime_input", JSONObject().apply {
+                    put("audio_stream_end", true)
+                })
+            }
+            webSocket?.send(endJson.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending audioStreamEnd: ${e.message}", e)
         }
     }
 
@@ -296,6 +315,51 @@ class GeminiLiveClient(private val context: Context) {
         }
     }
 
+    private fun startAudioStreamWorker() {
+        synchronized(workerLock) {
+            if (isWorkerRunning && wsAudioWorkerThread?.isAlive == true) return
+            incomingMessageQueue.clear()
+            isWorkerRunning = true
+            wsAudioWorkerThread = thread(name = "MyraWsAudioWorker") {
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+                } catch (_: Throwable) {
+                    try {
+                        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO)
+                    } catch (_: Throwable) {}
+                }
+                while (isWorkerRunning) {
+                    try {
+                        val payload = incomingMessageQueue.take()
+                        if (!isWorkerRunning) break
+                        parseServerMessage(payload)
+                    } catch (_: InterruptedException) {
+                        if (!isWorkerRunning) break
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Audio stream worker error: ${e.message}", e)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopAudioStreamWorker() {
+        synchronized(workerLock) {
+            isWorkerRunning = false
+            incomingMessageQueue.clear()
+            wsAudioWorkerThread?.interrupt()
+            wsAudioWorkerThread = null
+        }
+    }
+
+    private fun enqueueIncomingMessage(rawMessage: String) {
+        if (isWorkerRunning) {
+            incomingMessageQueue.offer(rawMessage)
+        } else {
+            parseServerMessage(rawMessage)
+        }
+    }
+
     private fun parseServerMessage(text: String) {
         try {
             val json = JSONObject(text)
@@ -308,6 +372,12 @@ class GeminiLiveClient(private val context: Context) {
                 return
             }
 
+            if (json.has("goAway")) {
+                Log.i(TAG, "Server requested goAway; reconnecting Live session")
+                handler.post { reconnect() }
+                return
+            }
+
             if (json.has("setupComplete")) {
                 Log.i(TAG, "Setup complete received from Gemini Live")
                 isSessionReady = true
@@ -316,7 +386,7 @@ class GeminiLiveClient(private val context: Context) {
                 return
             }
 
-            // Audio output chunks
+            // Audio output chunks — invoke directly into thread-safe playbackQueue without main-thread UI delay
             if (json.has("serverContent")) {
                 val serverContent = json.getJSONObject("serverContent")
 
@@ -331,7 +401,7 @@ class GeminiLiveClient(private val context: Context) {
                                 if (inlineData.has("data")) {
                                     val base64Data = inlineData.getString("data")
                                     val pcmBytes = Base64.decode(base64Data, Base64.NO_WRAP)
-                                    handler.post { onAudioReceived?.invoke(pcmBytes) }
+                                    onAudioReceived?.invoke(pcmBytes)
                                 }
                             } else if (part.has("text")) {
                                 val partText = part.optString("text", "")
@@ -405,6 +475,7 @@ class GeminiLiveClient(private val context: Context) {
         isSessionReady = false
         handler.removeCallbacks(sessionRenewalRunnable)
         handler.removeCallbacks(autoReconnectRunnable)
+        stopAudioStreamWorker()
         val ws = webSocket
         webSocket = null
         try {

@@ -255,6 +255,9 @@ class MyraVoiceService : Service() {
         if (!isAiRunning) return
         isMuted = !isMuted
         audioEngine?.isMuted = isMuted
+        if (isMuted) {
+            geminiLive?.sendAudioStreamEnd()
+        }
         MyraVoiceSession.setMuted(isMuted)
         val status = if (isMuted) "Microphone Muted 🔇" else "Sun rahi hoon... 🎙️"
         MyraVoiceSession.setStatusText(status)
@@ -265,7 +268,8 @@ class MyraVoiceService : Service() {
     }
 
     private fun interruptMyra() {
-        audioEngine?.clearPlaybackQueue()
+        audioEngine?.clearPlaybackQueue(immediateMicResume = true)
+        outputBuffer.clear()
         geminiLive?.sendInterrupt()
         if (isAiRunning) {
             MyraVoiceSession.setSpeaking(false)
@@ -341,7 +345,8 @@ class MyraVoiceService : Service() {
                 }
 
                 onInterrupted = {
-                    audioEngine?.clearPlaybackQueue()
+                    outputBuffer.clear()
+                    audioEngine?.clearPlaybackQueue(immediateMicResume = true)
                 }
 
                 onOutputTranscript = { text ->
@@ -448,6 +453,7 @@ class MyraVoiceService : Service() {
             else -> "Greet $name warmly in Banglish (Bengali + English mix) in 1 short sentence right now and ask how you can help."
         }
 
+        audioEngine?.suppressMicBriefly(500L)
         geminiLive?.sendText(prompt)
     }
 

@@ -3,12 +3,13 @@ package com.myra.assistant.ai
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.media.audiofx.AcousticEchoCanceler
-import android.media.audiofx.AutomaticGainControl
 import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.util.Base64
@@ -25,11 +26,12 @@ class AudioEngine(private val context: Context) {
         private const val TAG = "AudioEngine"
         private const val MIC_SAMPLE_RATE = 16000
         private const val SPEAKER_SAMPLE_RATE = 24000
-        private const val CHUNK_SIZE = 1024
-        private const val USER_SPEECH_RMS_THRESHOLD = 0.025f
-        private const val USER_SPEECH_END_MS = 240L
-        private const val AI_POST_SPEECH_COOLDOWN_MS = 180L
-        private const val CHUNK_GAP_GRACE_MS = 180L
+        private const val CHUNK_SIZE = 2048 // 64ms per frame @ 16kHz 16-bit mono -> half WebSocket overhead, fast latency
+        private const val USER_SPEECH_RMS_THRESHOLD = 0.010f
+        private const val USER_SPEECH_END_MS = 280L
+        private const val AI_POST_SPEECH_COOLDOWN_MS = 260L
+        private const val CHUNK_GAP_GRACE_MS = 450L
+        private const val STALE_AI_TURN_TIMEOUT_MS = 1400L
     }
 
     @Volatile var isMuted: Boolean = false
@@ -48,13 +50,17 @@ class AudioEngine(private val context: Context) {
     @Volatile private var isRecording: Boolean = false
     @Volatile private var isPlaying: Boolean = false
 
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var hasAudioFocus = false
+
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
-    private var gainControl: AutomaticGainControl? = null
 
     private val playbackQueue = LinkedBlockingQueue<ByteArray>()
+    private val trackLock = Any()
 
     var onAudioChunkRecorded: ((String) -> Unit)? = null
     var onAmplitudeChanged: ((Float) -> Unit)? = null
@@ -70,46 +76,131 @@ class AudioEngine(private val context: Context) {
     }
 
     private fun initAudioTrack() {
-        try {
-            val minBufferSize = AudioTrack.getMinBufferSize(
-                SPEAKER_SAMPLE_RATE,
-                AudioFormat.CHANNEL_OUT_MONO,
-                AudioFormat.ENCODING_PCM_16BIT
-            )
-            // Compact buffer for immediate low-latency voice output
-            val bufferSize = maxOf(minBufferSize, SPEAKER_SAMPLE_RATE / 6)
+        synchronized(trackLock) {
+            try {
+                audioTrack?.release()
+            } catch (_: Exception) {}
+            audioTrack = null
 
-            val attributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_MEDIA)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
+            try {
+                val minBufferSize = AudioTrack.getMinBufferSize(
+                    SPEAKER_SAMPLE_RATE,
+                    AudioFormat.CHANNEL_OUT_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT
+                )
+                // 500ms ring capacity prevents underrun crackles on 4G jitter while MODE_STREAM plays immediately on first write
+                val bufferSize = maxOf(minBufferSize, SPEAKER_SAMPLE_RATE / 2)
 
-            val format = AudioFormat.Builder()
-                .setSampleRate(SPEAKER_SAMPLE_RATE)
-                .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .build()
+                val attributes = AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build()
 
-            val builder = AudioTrack.Builder()
-                .setAudioAttributes(attributes)
-                .setAudioFormat(format)
-                .setBufferSizeInBytes(bufferSize)
-                .setTransferMode(AudioTrack.MODE_STREAM)
+                val format = AudioFormat.Builder()
+                    .setSampleRate(SPEAKER_SAMPLE_RATE)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .build()
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+                val builder = AudioTrack.Builder()
+                    .setAudioAttributes(attributes)
+                    .setAudioFormat(format)
+                    .setBufferSizeInBytes(bufferSize)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    // Use normal high-quality mixer path to avoid resampling clicks on 24kHz PCM
+                    builder.setPerformanceMode(AudioTrack.PERFORMANCE_MODE_NONE)
+                }
+
+                val track = builder.build()
+                if (track.state == AudioTrack.STATE_INITIALIZED) {
+                    track.play()
+                    audioTrack = track
+                } else {
+                    track.release()
+                    Log.e(TAG, "AudioTrack failed to initialize")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error initializing AudioTrack: ${e.message}", e)
             }
-
-            audioTrack = builder.build()
-            audioTrack?.play()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error initializing AudioTrack: ${e.message}", e)
         }
     }
 
+    private fun ensureAudioTrackReady(): AudioTrack? {
+        synchronized(trackLock) {
+            val existing = audioTrack
+            if (existing != null && existing.state == AudioTrack.STATE_INITIALIZED) {
+                if (existing.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                    try {
+                        existing.play()
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Rebuilding AudioTrack after play failure: ${e.message}")
+                        initAudioTrack()
+                    }
+                }
+                return audioTrack
+            }
+            initAudioTrack()
+            return audioTrack
+        }
+    }
+
+    private fun requestSpeechAudioFocus() {
+        if (hasAudioFocus) return
+        try {
+            val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val req = audioFocusRequest ?: AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(
+                        AudioAttributes.Builder()
+                            .setUsage(AudioAttributes.USAGE_MEDIA)
+                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                    .build()
+                    .also { audioFocusRequest = it }
+                audioManager.requestAudioFocus(req)
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.requestAudioFocus(
+                    null,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
+                )
+            }
+            hasAudioFocus = (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED)
+        } catch (e: Exception) {
+            Log.w(TAG, "Audio focus request failed: ${e.message}")
+        }
+    }
+
+    private fun abandonSpeechAudioFocus() {
+        if (!hasAudioFocus) return
+        hasAudioFocus = false
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.abandonAudioFocus(null)
+            }
+        } catch (_: Exception) {}
+    }
+
     fun isMicBlockedByAi(): Boolean {
-        return isSpeaking || isAiTurnActive || isExternalSpeaking ||
-            System.currentTimeMillis() < micUnmuteAfterMs
+        val now = System.currentTimeMillis()
+        // Fail-safe: never let a stale isAiTurnActive freeze the mic if no audio arrived recently
+        if (isAiTurnActive && !isSpeaking && playbackQueue.isEmpty() && (now - lastAudioQueuedAtMs) >= STALE_AI_TURN_TIMEOUT_MS) {
+            isAiTurnActive = false
+        }
+        return isSpeaking || isAiTurnActive || isExternalSpeaking || now < micUnmuteAfterMs
+    }
+
+    fun suppressMicBriefly(durationMs: Long) {
+        val target = System.currentTimeMillis() + durationMs
+        if (target > micUnmuteAfterMs) {
+            micUnmuteAfterMs = target
+        }
     }
 
     fun setExternalSpeaking(speaking: Boolean) {
@@ -151,8 +242,9 @@ class AudioEngine(private val context: Context) {
             )
             val bufferSize = maxOf(minBufferSize, CHUNK_SIZE * 4)
 
+            // Prefer VOICE_RECOGNITION for clean, full-gain speech pickup without VoIP attenuation on OEM devices
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
                 MIC_SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
@@ -162,7 +254,7 @@ class AudioEngine(private val context: Context) {
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 audioRecord?.release()
                 audioRecord = AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MediaRecorder.AudioSource.MIC,
                     MIC_SAMPLE_RATE,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
@@ -186,7 +278,7 @@ class AudioEngine(private val context: Context) {
                 while (isRecording) {
                     val read = audioRecord?.read(buffer, 0, buffer.size) ?: -1
                     if (read > 0) {
-                        // Half-duplex gate: while AI is speaking or cooling down, ignore all mic audio
+                        // Half-duplex echo guard: while AI is speaking or cooling down, pause mic upload cleanly
                         if (isMuted || isMicBlockedByAi()) {
                             if (isUserSpeaking) {
                                 isUserSpeaking = false
@@ -241,15 +333,6 @@ class AudioEngine(private val context: Context) {
         } catch (e: Exception) {
             Log.w(TAG, "NoiseSuppressor unavailable: ${e.message}")
         }
-        try {
-            if (AutomaticGainControl.isAvailable()) {
-                gainControl = AutomaticGainControl.create(sessionId)?.apply {
-                    enabled = true
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "AGC unavailable: ${e.message}")
-        }
     }
 
     private fun releaseAudioEffects() {
@@ -261,10 +344,6 @@ class AudioEngine(private val context: Context) {
             noiseSuppressor?.release()
         } catch (_: Exception) {}
         noiseSuppressor = null
-        try {
-            gainControl?.release()
-        } catch (_: Exception) {}
-        gainControl = null
     }
 
     fun stopRecording() {
@@ -285,12 +364,17 @@ class AudioEngine(private val context: Context) {
         isPlaying = true
 
         playbackThread = thread(name = "AudioPlaybackThread") {
-            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
+            try {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+            } catch (_: Throwable) {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
+            }
             while (isPlaying) {
                 try {
                     val chunk = playbackQueue.poll(30, TimeUnit.MILLISECONDS)
                     if (chunk != null) {
                         if (!isSpeaking) {
+                            requestSpeechAudioFocus()
                             isSpeaking = true
                             if (isUserSpeaking) {
                                 isUserSpeaking = false
@@ -302,13 +386,19 @@ class AudioEngine(private val context: Context) {
                         val rms = calculateRms(chunk, chunk.size)
                         onAmplitudeChanged?.invoke(rms)
 
-                        audioTrack?.write(chunk, 0, chunk.size)
-                    } else if (isSpeaking) {
-                        val elapsedSinceLastChunk = System.currentTimeMillis() - lastAudioQueuedAtMs
-                        if (!isAiTurnActive || elapsedSinceLastChunk >= CHUNK_GAP_GRACE_MS) {
-                            if (playbackQueue.isEmpty() && (!isAiTurnActive || elapsedSinceLastChunk >= CHUNK_GAP_GRACE_MS)) {
-                                finishSpeakingState()
+                        val track = ensureAudioTrackReady()
+                        if (track != null) {
+                            val written = track.write(chunk, 0, chunk.size)
+                            if (written < 0) {
+                                Log.w(TAG, "AudioTrack write error ($written); reinitializing track")
+                                initAudioTrack()
                             }
+                        }
+                    } else if (isSpeaking || isAiTurnActive) {
+                        val elapsedSinceLastChunk = System.currentTimeMillis() - lastAudioQueuedAtMs
+                        val gapThreshold = if (isAiTurnActive) CHUNK_GAP_GRACE_MS else 120L
+                        if (playbackQueue.isEmpty() && elapsedSinceLastChunk >= gapThreshold) {
+                            finishSpeakingState()
                         }
                     }
                 } catch (_: InterruptedException) {
@@ -320,21 +410,27 @@ class AudioEngine(private val context: Context) {
         }
     }
 
-    private fun finishSpeakingState() {
-        if (!isSpeaking && !isAiTurnActive) return
+    private fun finishSpeakingState(withCooldown: Boolean = true) {
+        val wasSpeaking = isSpeaking
         isSpeaking = false
         isAiTurnActive = false
-        micUnmuteAfterMs = System.currentTimeMillis() + AI_POST_SPEECH_COOLDOWN_MS
-        onSpeakingStopped?.invoke()
+        if (withCooldown) {
+            micUnmuteAfterMs = System.currentTimeMillis() + AI_POST_SPEECH_COOLDOWN_MS
+        } else {
+            micUnmuteAfterMs = 0L
+        }
+        abandonSpeechAudioFocus()
+        if (wasSpeaking) {
+            onSpeakingStopped?.invoke()
+        }
     }
 
     fun stopPlayback() {
         isPlaying = false
         isAiTurnActive = false
         playbackQueue.clear()
-        if (isSpeaking) {
-            finishSpeakingState()
-        }
+        flushAudioTrack()
+        finishSpeakingState(withCooldown = false)
     }
 
     fun queueAudio(pcmData: ByteArray) {
@@ -348,23 +444,37 @@ class AudioEngine(private val context: Context) {
         }
     }
 
-    fun clearPlaybackQueue() {
+    fun clearPlaybackQueue(immediateMicResume: Boolean = false) {
         isAiTurnActive = false
         playbackQueue.clear()
-        if (isSpeaking) {
-            finishSpeakingState()
+        flushAudioTrack()
+        finishSpeakingState(withCooldown = !immediateMicResume)
+    }
+
+    private fun flushAudioTrack() {
+        synchronized(trackLock) {
+            try {
+                val track = audioTrack ?: return
+                if (track.state == AudioTrack.STATE_INITIALIZED) {
+                    track.pause()
+                    track.flush()
+                    track.play()
+                }
+            } catch (_: Exception) {}
         }
     }
 
     fun release() {
         stopRecording()
         stopPlayback()
-        try {
-            audioTrack?.stop()
-            audioTrack?.release()
-            audioTrack = null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error releasing audio track: ${e.message}", e)
+        synchronized(trackLock) {
+            try {
+                audioTrack?.stop()
+                audioTrack?.release()
+                audioTrack = null
+            } catch (e: Exception) {
+                Log.e(TAG, "Error releasing audio track: ${e.message}", e)
+            }
         }
     }
 

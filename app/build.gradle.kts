@@ -17,8 +17,8 @@ android {
     applicationId = "com.myra.assistant"
     minSdk = 26
     targetSdk = 34
-    versionCode = System.getenv("APP_VERSION_CODE")?.toIntOrNull() ?: 4
-    versionName = System.getenv("APP_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "2.2"
+    versionCode = System.getenv("APP_VERSION_CODE")?.toIntOrNull() ?: 5
+    versionName = System.getenv("APP_VERSION_NAME")?.takeIf { it.isNotBlank() } ?: "2.3"
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
