@@ -50,7 +50,7 @@ data class SettingsUiState(
     val isOverlayEnabled: Boolean = false,
     val isAccessibilityEnabled: Boolean = false,
     val isNotificationAccessEnabled: Boolean = false,
-    val appVersion: String = "2.3",
+    val appVersion: String = "2.4",
     val updateServiceStatus: String = "Update Service: Ready",
     val isTestingApi: Boolean = false,
     val apiTestButtonLabel: String = "TEST GEMINI API",
