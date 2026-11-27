@@ -4,156 +4,203 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
-import android.view.LayoutInflater
-import android.view.View
-import android.view.ViewGroup
-import android.widget.ArrayAdapter
-import android.widget.EditText
-import android.widget.ImageButton
-import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.recyclerview.widget.LinearLayoutManager
-import androidx.recyclerview.widget.RecyclerView
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.myra.assistant.BuildConfig
-import com.myra.assistant.R
-import com.myra.assistant.databinding.ActivitySettingsBinding
 import com.myra.assistant.service.AccessibilityHelperService
 import com.myra.assistant.update.GitHubUpdateChecker
 import com.myra.assistant.update.RemoteConfigUpdateManager
 import com.myra.assistant.update.UpdateDialogHelper
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.IOException
+import java.util.concurrent.TimeUnit
 
 class SettingsActivity : AppCompatActivity() {
-
-    private lateinit var binding: ActivitySettingsBinding
-    private val primeContacts = mutableListOf<Pair<String, String>>()
-    private lateinit var primeAdapter: PrimeContactAdapter
 
     private val defaultLiveModels = listOf(
         "Gemini 2.5 Flash Native Audio (Default)" to "models/gemini-2.5-flash-native-audio-preview-12-2025",
         "Gemini 2.5 Flash Native Audio (09-2025)" to "models/gemini-2.5-flash-native-audio-preview-09-2025",
         "Gemini 2.5 Flash Live" to "models/gemini-2.5-flash-live-preview"
     )
-    private val modelOptions = defaultLiveModels.toMutableList()
-    private lateinit var modelAdapter: ArrayAdapter<String>
 
-    private val voiceOptions = listOf(
-        "Aoede (Female)" to "Aoede",
-        "Charon (Male)" to "Charon",
-        "Kore (Female)" to "Kore",
-        "Fenrir (Male)" to "Fenrir",
-        "Puck (Male)" to "Puck",
-        "Leda (Female)" to "Leda",
-        "Orus (Male)" to "Orus",
-        "Zephyr (Female)" to "Zephyr"
-    )
+    private var uiState by mutableStateOf(SettingsUiState(modelOptions = defaultLiveModels))
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivitySettingsBinding.inflate(layoutInflater)
-        setContentView(binding.root)
+        enableEdgeToEdge()
 
-        setupSpinners()
-        setupPrimeContactsRecycler()
         loadSavedSettings()
-        checkAccessibilityStatus()
         refreshActiveLiveModelsSilently()
 
-        binding.backBtn.setOnClickListener { finish() }
-
-        binding.addPrimeBtn.setOnClickListener {
-            showAddPrimeContactDialog()
-        }
-
-        binding.accessibilityCard.setOnClickListener {
-            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-            startActivity(intent)
-        }
-
-        binding.saveBtn.setOnClickListener {
-            saveSettings()
-        }
-
-        binding.testApiKeyBtn.setOnClickListener {
-            testGeminiApiKey()
-        }
-
-        binding.checkUpdateBtn.setOnClickListener {
-            checkForUpdatesManually()
+        setContent {
+            MyraSettingsScreen(
+                state = uiState,
+                onApiKeyChange = { newKey ->
+                    uiState = uiState.copy(apiKey = newKey)
+                },
+                onUserNameChange = { newName ->
+                    uiState = uiState.copy(userName = newName)
+                },
+                onModelSelected = { modelId ->
+                    uiState = uiState.copy(selectedModel = modelId)
+                    persistCurrentSettings(showToast = false)
+                },
+                onVoiceSelected = { voiceId ->
+                    uiState = uiState.copy(selectedVoice = voiceId)
+                    persistCurrentSettings(showToast = false)
+                },
+                onPersonalitySelected = { mode ->
+                    uiState = uiState.copy(personalityMode = mode)
+                    persistCurrentSettings(showToast = false)
+                },
+                onLanguageSelected = { lang ->
+                    uiState = uiState.copy(languageMode = lang)
+                    persistCurrentSettings(showToast = false)
+                },
+                onAddPrimeContact = { name, number ->
+                    uiState = uiState.copy(
+                        primeContacts = uiState.primeContacts + PrimeContactItem(name, number)
+                    )
+                    persistCurrentSettings(showToast = false)
+                },
+                onDeletePrimeContact = { index ->
+                    if (index in uiState.primeContacts.indices) {
+                        val updated = uiState.primeContacts.toMutableList().apply { removeAt(index) }
+                        uiState = uiState.copy(primeContacts = updated)
+                        persistCurrentSettings(showToast = false)
+                    }
+                },
+                onTestApiClick = {
+                    persistCurrentSettings(showToast = false)
+                    testGeminiApiKey()
+                },
+                onOpenAccessibilityClick = {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                },
+                onCheckUpdatesClick = {
+                    checkForUpdatesManually()
+                },
+                onSaveClick = {
+                    persistCurrentSettings(showToast = true)
+                    finish()
+                },
+                onCloseClick = {
+                    persistCurrentSettings(showToast = false)
+                    finish()
+                }
+            )
         }
     }
 
-    private fun checkForUpdatesManually() {
-        val repo = GitHubUpdateChecker.getConfiguredRepo(this)
-        binding.checkUpdateBtn.isEnabled = false
-        binding.checkUpdateBtn.text = "CHECKING FOR UPDATES..."
-        binding.remoteConfigStatusText.text = "Update Service: Checking..."
-
-        RemoteConfigUpdateManager.checkForUpdates(this, forceRefresh = true, repoOverride = repo) { outcome ->
-            runOnUiThread {
-                binding.checkUpdateBtn.isEnabled = true
-                binding.checkUpdateBtn.text = "CHECK FOR UPDATES"
-                val syncLabel = if (outcome.remoteConfigSynced) "Active" else "Ready"
-                binding.remoteConfigStatusText.text =
-                    "Update Service: $syncLabel (Latest v${outcome.remoteLatestVersion.removePrefix("v").removePrefix("V")})"
-
-                when (val result = outcome.checkResult) {
-                    is GitHubUpdateChecker.CheckResult.UpdateAvailable -> {
-                        UpdateDialogHelper.showUpdateDialog(
-                            activity = this@SettingsActivity,
-                            release = result.release,
-                            isMandatory = outcome.isMandatory
-                        )
-                    }
-                    is GitHubUpdateChecker.CheckResult.UpToDate -> {
-                        val latestNote = if (result.latestTag != null) " (${result.latestTag})" else ""
-                        AlertDialog.Builder(this@SettingsActivity)
-                            .setTitle("Up to Date ✅")
-                            .setMessage("MYRA v${result.currentVersion} is already the latest version$latestNote.")
-                            .setPositiveButton("OK", null)
-                            .show()
-                    }
-                    is GitHubUpdateChecker.CheckResult.Error -> {
-                        AlertDialog.Builder(this@SettingsActivity)
-                            .setTitle("Update Check Info ⚠️")
-                            .setMessage(result.message)
-                            .setPositiveButton("OK", null)
-                            .show()
-                    }
-                }
-            }
-        }
+    override fun onResume() {
+        super.onResume()
+        uiState = uiState.copy(
+            isAccessibilityEnabled = AccessibilityHelperService.isEnabled(this)
+        )
     }
 
     private fun getEffectiveApiKey(): String {
-        var apiKey = binding.apiKeyInput.text.toString().trim()
+        var apiKey = uiState.apiKey.trim()
         if (apiKey.isEmpty()) {
             apiKey = BuildConfig.GEMINI_API_KEY
         }
         return if (apiKey == "MY_GEMINI_API_KEY") "" else apiKey
     }
 
+    private fun loadSavedSettings() {
+        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+
+        val savedKey = prefs.getString("api_key", "")?.trim() ?: ""
+        val effectiveKey = if (savedKey.isEmpty() && BuildConfig.GEMINI_API_KEY.isNotEmpty() && BuildConfig.GEMINI_API_KEY != "MY_GEMINI_API_KEY") {
+            BuildConfig.GEMINI_API_KEY
+        } else {
+            savedKey
+        }
+
+        val savedContacts = mutableListOf<PrimeContactItem>()
+        val jsonStr = prefs.getString("prime_contacts_json", null)
+        if (!jsonStr.isNullOrEmpty()) {
+            try {
+                val array = JSONArray(jsonStr)
+                for (i in 0 until array.length()) {
+                    val obj = array.getJSONObject(i)
+                    savedContacts.add(
+                        PrimeContactItem(
+                            name = obj.optString("name", ""),
+                            number = obj.optString("number", "")
+                        )
+                    )
+                }
+            } catch (_: Exception) {}
+        }
+
+        uiState = uiState.copy(
+            apiKey = effectiveKey,
+            userName = prefs.getString("user_name", "Alex") ?: "Alex",
+            selectedModel = prefs.getString("gemini_model", defaultLiveModels.first().second)
+                ?: defaultLiveModels.first().second,
+            selectedVoice = prefs.getString("gemini_voice", "Aoede") ?: "Aoede",
+            personalityMode = prefs.getString("personality_mode", "GF") ?: "GF",
+            languageMode = prefs.getString("language_mode", "Banglish") ?: "Banglish",
+            primeContacts = savedContacts,
+            isAccessibilityEnabled = AccessibilityHelperService.isEnabled(this),
+            appVersion = BuildConfig.VERSION_NAME,
+            updateServiceStatus = RemoteConfigUpdateManager.getCurrentRemoteSummary()
+        )
+    }
+
+    private fun persistCurrentSettings(showToast: Boolean) {
+        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+        val array = JSONArray()
+        for (c in uiState.primeContacts) {
+            array.put(JSONObject().apply {
+                put("name", c.name)
+                put("number", c.number)
+            })
+        }
+
+        prefs.edit()
+            .putString("api_key", uiState.apiKey.trim())
+            .putString("user_name", uiState.userName.trim().ifEmpty { "Alex" })
+            .putString("gemini_model", uiState.selectedModel)
+            .putString("gemini_voice", uiState.selectedVoice)
+            .putString("personality_mode", uiState.personalityMode)
+            .putString("language_mode", uiState.languageMode)
+            .putString("prime_contacts_json", array.toString())
+            .apply()
+
+        if (showToast) {
+            Toast.makeText(this, "Settings Saved!", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun refreshActiveLiveModelsSilently() {
         val apiKey = getEffectiveApiKey()
         if (apiKey.isEmpty()) return
 
-        val client = okhttp3.OkHttpClient.Builder()
-            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+        val client = OkHttpClient.Builder()
+            .connectTimeout(10, TimeUnit.SECONDS)
+            .readTimeout(10, TimeUnit.SECONDS)
             .build()
 
-        val request = okhttp3.Request.Builder()
+        val request = Request.Builder()
             .url("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
             .get()
             .build()
 
         client.newCall(request).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {}
+            override fun onFailure(call: okhttp3.Call, e: IOException) {}
 
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 val bodyStr = response.body?.string() ?: return
@@ -161,37 +208,24 @@ class SettingsActivity : AppCompatActivity() {
                 val discoveredLive = parseModelsFromResponse(bodyStr).second
                 if (discoveredLive.isNotEmpty()) {
                     runOnUiThread {
-                        updateLiveModelSpinner(discoveredLive)
+                        mergeLiveModels(discoveredLive)
                     }
                 }
             }
         })
     }
 
-    private fun updateLiveModelSpinner(discoveredLive: List<Pair<String, String>>) {
-        val currentSelected = modelOptions.getOrNull(binding.modelSpinner.selectedItemPosition)?.second
+    private fun mergeLiveModels(discoveredLive: List<Pair<String, String>>) {
         val merged = mutableListOf<Pair<String, String>>()
         val seenIds = mutableSetOf<String>()
 
         for (item in discoveredLive) {
-            if (seenIds.add(item.second)) {
-                merged.add(item)
-            }
+            if (seenIds.add(item.second)) merged.add(item)
         }
         for (item in defaultLiveModels) {
-            if (seenIds.add(item.second)) {
-                merged.add(item)
-            }
+            if (seenIds.add(item.second)) merged.add(item)
         }
-
-        modelOptions.clear()
-        modelOptions.addAll(merged)
-        modelAdapter.clear()
-        modelAdapter.addAll(modelOptions.map { it.first })
-        modelAdapter.notifyDataSetChanged()
-
-        val targetIdx = modelOptions.indexOfFirst { it.second == currentSelected }.coerceAtLeast(0)
-        binding.modelSpinner.setSelection(targetIdx)
+        uiState = uiState.copy(modelOptions = merged)
     }
 
     private fun parseModelsFromResponse(jsonStr: String): Pair<List<String>, List<Pair<String, String>>> {
@@ -202,7 +236,7 @@ class SettingsActivity : AppCompatActivity() {
             val arr = root.optJSONArray("models") ?: return Pair(chatModels, liveModels)
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
-                val fullName = obj.optString("name", "") // e.g. "models/gemini-3.8-flash"
+                val fullName = obj.optString("name", "")
                 val displayName = obj.optString("displayName", fullName.removePrefix("models/"))
                 val methods = obj.optJSONArray("supportedGenerationMethods") ?: continue
 
@@ -236,7 +270,6 @@ class SettingsActivity : AppCompatActivity() {
             }
         } catch (_: Exception) {}
 
-        // Prioritize stable & newer flash/flash-lite models first
         val sortedChat = chatModels.sortedWith(
             compareByDescending<String> { it.contains("flash") && !it.contains("exp") }
                 .thenByDescending { it.contains("flash-lite") || it.contains("flash") }
@@ -253,25 +286,22 @@ class SettingsActivity : AppCompatActivity() {
             return
         }
 
-        binding.testApiKeyBtn.isEnabled = false
-        binding.testApiKeyBtn.text = "CHECKING ACTIVE MODELS..."
+        uiState = uiState.copy(isTestingApi = true, apiTestButtonLabel = "CHECKING ACTIVE MODELS...")
 
-        val client = okhttp3.OkHttpClient.Builder()
-            .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
-            .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        val client = OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
             .build()
 
-        // Step 1: Discover all currently active models directly from Gemini API
-        val listRequest = okhttp3.Request.Builder()
+        val listRequest = Request.Builder()
             .url("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
             .get()
             .build()
 
         client.newCall(listRequest).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+            override fun onFailure(call: okhttp3.Call, e: IOException) {
                 runOnUiThread {
-                    binding.testApiKeyBtn.isEnabled = true
-                    binding.testApiKeyBtn.text = "TEST GEMINI API"
+                    uiState = uiState.copy(isTestingApi = false, apiTestButtonLabel = "TEST GEMINI API")
                     Toast.makeText(this@SettingsActivity, "Connection Failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
@@ -280,8 +310,7 @@ class SettingsActivity : AppCompatActivity() {
                 val listResponseStr = response.body?.string() ?: ""
                 if (!response.isSuccessful) {
                     runOnUiThread {
-                        binding.testApiKeyBtn.isEnabled = true
-                        binding.testApiKeyBtn.text = "TEST GEMINI API"
+                        uiState = uiState.copy(isTestingApi = false, apiTestButtonLabel = "TEST GEMINI API")
                         AlertDialog.Builder(this@SettingsActivity)
                             .setTitle("Gemini API Key Error ❌")
                             .setMessage("Error code ${response.code}:\n$listResponseStr")
@@ -299,9 +328,7 @@ class SettingsActivity : AppCompatActivity() {
                         .apply()
                 }
                 if (activeLiveModels.isNotEmpty()) {
-                    runOnUiThread {
-                        updateLiveModelSpinner(activeLiveModels)
-                    }
+                    runOnUiThread { mergeLiveModels(activeLiveModels) }
                 }
 
                 val modelsToTry = if (activeChatModels.isNotEmpty()) {
@@ -310,16 +337,13 @@ class SettingsActivity : AppCompatActivity() {
                     listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash")
                 }
 
-                runOnUiThread {
-                    binding.testApiKeyBtn.text = "TESTING ${modelsToTry.first()}..."
-                }
                 tryModelAtIndex(client, apiKey, modelsToTry, activeLiveModels.map { it.second.removePrefix("models/") }, 0)
             }
         })
     }
 
     private fun tryModelAtIndex(
-        client: okhttp3.OkHttpClient,
+        client: OkHttpClient,
         apiKey: String,
         models: List<String>,
         activeLiveIds: List<String>,
@@ -327,12 +351,11 @@ class SettingsActivity : AppCompatActivity() {
     ) {
         if (index >= models.size) {
             runOnUiThread {
-                binding.testApiKeyBtn.isEnabled = true
-                binding.testApiKeyBtn.text = "TEST GEMINI API"
+                uiState = uiState.copy(isTestingApi = false, apiTestButtonLabel = "TEST GEMINI API")
                 val activeListSummary = models.joinToString("\n• ", prefix = "• ")
                 AlertDialog.Builder(this@SettingsActivity)
                     .setTitle("API Key Valid, Models Busy ⚠️")
-                    .setMessage("Your API key is active! Discovered active models:\n$activeListSummary\n\nAll returned temporary 503/429 load errors right now. Please try again in a moment.")
+                    .setMessage("Your API key is active! Discovered active models:\n$activeListSummary\n\nAll returned temporary 503/429 load errors right now.")
                     .setPositiveButton("OK", null)
                     .show()
             }
@@ -341,7 +364,7 @@ class SettingsActivity : AppCompatActivity() {
 
         val modelId = models[index]
         runOnUiThread {
-            binding.testApiKeyBtn.text = "TESTING $modelId..."
+            uiState = uiState.copy(apiTestButtonLabel = "TESTING $modelId...")
         }
 
         val jsonBody = JSONObject().apply {
@@ -353,17 +376,15 @@ class SettingsActivity : AppCompatActivity() {
         }
 
         val body = jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-
-        val request = okhttp3.Request.Builder()
+        val request = Request.Builder()
             .url("https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent?key=$apiKey")
             .post(body)
             .build()
 
         client.newCall(request).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+            override fun onFailure(call: okhttp3.Call, e: IOException) {
                 runOnUiThread {
-                    binding.testApiKeyBtn.isEnabled = true
-                    binding.testApiKeyBtn.text = "TEST GEMINI API"
+                    uiState = uiState.copy(isTestingApi = false, apiTestButtonLabel = "TEST GEMINI API")
                     Toast.makeText(this@SettingsActivity, "Test Failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
@@ -373,39 +394,33 @@ class SettingsActivity : AppCompatActivity() {
                 val code = response.code
                 if (response.isSuccessful) {
                     runOnUiThread {
-                        binding.testApiKeyBtn.isEnabled = true
-                        binding.testApiKeyBtn.text = "TEST GEMINI API"
+                        uiState = uiState.copy(isTestingApi = false, apiTestButtonLabel = "TEST GEMINI API")
                         val activeSummary = models.take(4).joinToString(", ")
                         val liveSummary = if (activeLiveIds.isNotEmpty()) {
                             "\n\nActive Live Audio Models:\n• " + activeLiveIds.take(4).joinToString("\n• ")
                         } else ""
-                        try {
-                            val json = JSONObject(responseStr)
-                            val text = json.getJSONArray("candidates")
+                        val text = try {
+                            JSONObject(responseStr)
+                                .getJSONArray("candidates")
                                 .getJSONObject(0)
                                 .getJSONObject("content")
                                 .getJSONArray("parts")
                                 .getJSONObject(0)
                                 .getString("text")
-                            AlertDialog.Builder(this@SettingsActivity)
-                                .setTitle("Gemini API Active ✅")
-                                .setMessage("Tested Model: $modelId\nResponse:\n$text\n\nActive Chat Models:\n$activeSummary$liveSummary")
-                                .setPositiveButton("OK", null)
-                                .show()
-                        } catch (e: Exception) {
-                            AlertDialog.Builder(this@SettingsActivity)
-                                .setTitle("Gemini API Active ✅")
-                                .setMessage("Connected via $modelId!\n\nActive Chat Models:\n$activeSummary$liveSummary")
-                                .setPositiveButton("OK", null)
-                                .show()
+                        } catch (_: Exception) {
+                            "Connected successfully!"
                         }
+                        AlertDialog.Builder(this@SettingsActivity)
+                            .setTitle("Gemini API Active ✅")
+                            .setMessage("Tested Model: $modelId\nResponse:\n$text\n\nActive Chat Models:\n$activeSummary$liveSummary")
+                            .setPositiveButton("OK", null)
+                            .show()
                     }
                 } else if ((code == 503 || code == 404 || code == 429 || code == 400) && index + 1 < models.size) {
                     tryModelAtIndex(client, apiKey, models, activeLiveIds, index + 1)
                 } else {
                     runOnUiThread {
-                        binding.testApiKeyBtn.isEnabled = true
-                        binding.testApiKeyBtn.text = "TEST GEMINI API"
+                        uiState = uiState.copy(isTestingApi = false, apiTestButtonLabel = "TEST GEMINI API")
                         AlertDialog.Builder(this@SettingsActivity)
                             .setTitle("Gemini API Test Failed ❌")
                             .setMessage("Model: $modelId\nError code $code:\n$responseStr")
@@ -417,193 +432,48 @@ class SettingsActivity : AppCompatActivity() {
         })
     }
 
-    override fun onResume() {
-        super.onResume()
-        checkAccessibilityStatus()
-    }
+    private fun checkForUpdatesManually() {
+        val repo = GitHubUpdateChecker.getConfiguredRepo(this)
+        uiState = uiState.copy(
+            isCheckingUpdates = true,
+            updateButtonLabel = "CHECKING FOR UPDATES...",
+            updateServiceStatus = "Update Service: Checking..."
+        )
 
-    private fun setupSpinners() {
-        modelAdapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            modelOptions.map { it.first }.toMutableList()
-        ).apply {
-            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        }
-        binding.modelSpinner.adapter = modelAdapter
+        RemoteConfigUpdateManager.checkForUpdates(this, forceRefresh = true, repoOverride = repo) { outcome ->
+            runOnUiThread {
+                val syncLabel = if (outcome.remoteConfigSynced) "Active" else "Ready"
+                uiState = uiState.copy(
+                    isCheckingUpdates = false,
+                    updateButtonLabel = "CHECK FOR UPDATES",
+                    updateServiceStatus = "Update Service: $syncLabel (Latest v${outcome.remoteLatestVersion.removePrefix("v").removePrefix("V")})"
+                )
 
-        val voiceAdapter = ArrayAdapter(
-            this,
-            android.R.layout.simple_spinner_item,
-            voiceOptions.map { it.first }
-        ).apply {
-            setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        }
-        binding.voiceSpinner.adapter = voiceAdapter
-    }
-
-    private fun setupPrimeContactsRecycler() {
-        primeAdapter = PrimeContactAdapter(primeContacts) { pos ->
-            primeContacts.removeAt(pos)
-            primeAdapter.notifyItemRemoved(pos)
-        }
-        binding.primeContactsRecycler.layoutManager = LinearLayoutManager(this)
-        binding.primeContactsRecycler.adapter = primeAdapter
-    }
-
-    private fun loadSavedSettings() {
-        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
-
-        val savedKey = prefs.getString("api_key", "")?.trim() ?: ""
-        val effectiveKey = if (savedKey.isEmpty() && BuildConfig.GEMINI_API_KEY.isNotEmpty() && BuildConfig.GEMINI_API_KEY != "MY_GEMINI_API_KEY") {
-            BuildConfig.GEMINI_API_KEY
-        } else {
-            savedKey
-        }
-        binding.apiKeyInput.setText(effectiveKey)
-        binding.userNameInput.setText(prefs.getString("user_name", "Alex"))
-
-        val savedModel = prefs.getString("gemini_model", "models/gemini-2.5-flash-native-audio-preview-12-2025")
-        val modelIdx = modelOptions.indexOfFirst { it.second == savedModel }.coerceAtLeast(0)
-        binding.modelSpinner.setSelection(modelIdx)
-
-        val savedVoice = prefs.getString("gemini_voice", "Aoede")
-        val voiceIdx = voiceOptions.indexOfFirst { it.second == savedVoice }.coerceAtLeast(0)
-        binding.voiceSpinner.setSelection(voiceIdx)
-
-        when (prefs.getString("personality_mode", "GF")) {
-            "Professional" -> binding.radioProfessional.isChecked = true
-            "Assistant" -> binding.radioAssistant.isChecked = true
-            else -> binding.radioGf.isChecked = true
-        }
-
-        when (prefs.getString("language_mode", "Banglish")) {
-            "Bangla" -> binding.radioLangBangla.isChecked = true
-            "English" -> binding.radioLangEnglish.isChecked = true
-            "Hindi" -> binding.radioLangHindi.isChecked = true
-            else -> binding.radioLangBanglish.isChecked = true
-        }
-
-        binding.appVersionText.text = "v${BuildConfig.VERSION_NAME}"
-        binding.githubRepoInput.setText(GitHubUpdateChecker.getConfiguredRepo(this))
-        binding.remoteConfigStatusText.text = RemoteConfigUpdateManager.getCurrentRemoteSummary()
-
-        primeContacts.clear()
-        val jsonStr = prefs.getString("prime_contacts_json", null)
-        if (!jsonStr.isNullOrEmpty()) {
-            try {
-                val array = JSONArray(jsonStr)
-                for (i in 0 until array.length()) {
-                    val obj = array.getJSONObject(i)
-                    primeContacts.add(Pair(obj.optString("name", ""), obj.optString("number", "")))
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
-            }
-        }
-        primeAdapter.notifyDataSetChanged()
-    }
-
-    private fun checkAccessibilityStatus() {
-        val isEnabled = AccessibilityHelperService.isEnabled(this)
-        if (isEnabled) {
-            binding.accessibilityStatusText.text = "Status: ACTIVE ✅"
-            binding.accessibilityStatusText.setTextColor(resources.getColor(R.color.success_green, theme))
-        } else {
-            binding.accessibilityStatusText.text = "Status: DISABLED ❌ (Tap to enable)"
-            binding.accessibilityStatusText.setTextColor(resources.getColor(R.color.red_accent, theme))
-        }
-    }
-
-    private fun showAddPrimeContactDialog() {
-        val dialogView = LayoutInflater.from(this).inflate(R.layout.dialog_add_prime_contact, null)
-        val nameInput = dialogView.findViewById<EditText>(R.id.dialogNameInput)
-        val numberInput = dialogView.findViewById<EditText>(R.id.dialogNumberInput)
-
-        AlertDialog.Builder(this)
-            .setView(dialogView)
-            .setPositiveButton("ADD") { _, _ ->
-                val name = nameInput.text.toString().trim()
-                val number = numberInput.text.toString().trim()
-                if (name.isNotEmpty() || number.isNotEmpty()) {
-                    primeContacts.add(Pair(name, number))
-                    primeAdapter.notifyItemInserted(primeContacts.size - 1)
+                when (val result = outcome.checkResult) {
+                    is GitHubUpdateChecker.CheckResult.UpdateAvailable -> {
+                        UpdateDialogHelper.showUpdateDialog(
+                            activity = this@SettingsActivity,
+                            release = result.release,
+                            isMandatory = outcome.isMandatory
+                        )
+                    }
+                    is GitHubUpdateChecker.CheckResult.UpToDate -> {
+                        val latestNote = if (result.latestTag != null) " (${result.latestTag})" else ""
+                        AlertDialog.Builder(this@SettingsActivity)
+                            .setTitle("Up to Date ✅")
+                            .setMessage("MYRA v${result.currentVersion} is already the latest version$latestNote.")
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
+                    is GitHubUpdateChecker.CheckResult.Error -> {
+                        AlertDialog.Builder(this@SettingsActivity)
+                            .setTitle("Update Check Info ⚠️")
+                            .setMessage(result.message)
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
                 }
             }
-            .setNegativeButton("CANCEL", null)
-            .show()
-    }
-
-    private fun saveSettings() {
-        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
-
-        val apiKey = binding.apiKeyInput.text.toString().trim()
-        val userName = binding.userNameInput.text.toString().trim().ifEmpty { "Alex" }
-        val selectedModel = modelOptions[binding.modelSpinner.selectedItemPosition].second
-        val selectedVoice = voiceOptions[binding.voiceSpinner.selectedItemPosition].second
-
-        val personality = when {
-            binding.radioProfessional.isChecked -> "Professional"
-            binding.radioAssistant.isChecked -> "Assistant"
-            else -> "GF"
         }
-
-        val language = when {
-            binding.radioLangBangla.isChecked -> "Bangla"
-            binding.radioLangEnglish.isChecked -> "English"
-            binding.radioLangHindi.isChecked -> "Hindi"
-            else -> "Banglish"
-        }
-
-        val array = JSONArray()
-        for (c in primeContacts) {
-            val obj = JSONObject().apply {
-                put("name", c.first)
-                put("number", c.second)
-            }
-            array.put(obj)
-        }
-
-        val githubRepo = GitHubUpdateChecker.normalizeRepo(binding.githubRepoInput.text.toString())
-
-        prefs.edit()
-            .putString("api_key", apiKey)
-            .putString("user_name", userName)
-            .putString("gemini_model", selectedModel)
-            .putString("gemini_voice", selectedVoice)
-            .putString("personality_mode", personality)
-            .putString("language_mode", language)
-            .putString("github_repo", githubRepo)
-            .putString("prime_contacts_json", array.toString())
-            .apply()
-
-        Toast.makeText(this, "Settings Saved! Restarting connection...", Toast.LENGTH_SHORT).show()
-        finish()
     }
-}
-
-class PrimeContactAdapter(
-    private val items: List<Pair<String, String>>,
-    private val onDeleteClick: (Int) -> Unit
-) : RecyclerView.Adapter<PrimeContactAdapter.ViewHolder>() {
-
-    class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
-        val nameText: TextView = view.findViewById(R.id.primeItemName)
-        val numberText: TextView = view.findViewById(R.id.primeItemNumber)
-        val deleteBtn: ImageButton = view.findViewById(R.id.primeItemDelete)
-    }
-
-    override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): ViewHolder {
-        val view = LayoutInflater.from(parent.context).inflate(R.layout.item_prime_contact, parent, false)
-        return ViewHolder(view)
-    }
-
-    override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        val item = items[position]
-        holder.nameText.text = if (item.first.isNotEmpty()) item.first else "Prime Contact"
-        holder.numberText.text = item.second
-        holder.deleteBtn.setOnClickListener { onDeleteClick(position) }
-    }
-
-    override fun getItemCount(): Int = items.size
 }
