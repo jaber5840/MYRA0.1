@@ -11,6 +11,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.text.SimpleDateFormat
@@ -22,6 +23,7 @@ class GeminiLiveClient(private val context: Context) {
 
     companion object {
         private const val TAG = "GeminiLiveClient"
+        private const val DEFAULT_LIVE_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
         private const val BASE_WS_URL = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent"
         private const val SESSION_RENEW_AFTER_MS = 540_000L // 9 minutes
         private const val KEEPALIVE_INTERVAL_MS = 8_000L // 8 seconds
@@ -42,7 +44,13 @@ class GeminiLiveClient(private val context: Context) {
     @Volatile var isConnecting = false
         private set
 
+    @Volatile var isSessionReady = false
+        private set
+
+    @Volatile private var shouldAutoReconnect = true
+
     var onConnected: (() -> Unit)? = null
+    var onSetupComplete: (() -> Unit)? = null
     var onDisconnected: (() -> Unit)? = null
     var onError: ((String) -> Unit)? = null
     var onAudioReceived: ((ByteArray) -> Unit)? = null
@@ -52,7 +60,7 @@ class GeminiLiveClient(private val context: Context) {
 
     private val keepAliveRunnable = object : Runnable {
         override fun run() {
-            if (isConnected) {
+            if (isConnected && isSessionReady) {
                 // Send silent PCM chunk to keep connection alive
                 val silentPcm = ByteArray(512)
                 val base64 = Base64.encodeToString(silentPcm, Base64.NO_WRAP)
@@ -67,9 +75,33 @@ class GeminiLiveClient(private val context: Context) {
         reconnect()
     }
 
+    private val autoReconnectRunnable = Runnable {
+        if (shouldAutoReconnect && !isConnected && !isConnecting) {
+            Log.i(TAG, "Attempting auto-reconnect...")
+            connect()
+        }
+    }
+
+    private fun resolveActiveLiveModel(savedModel: String?): String {
+        if (savedModel.isNullOrBlank()) return DEFAULT_LIVE_MODEL
+        val lower = savedModel.lowercase()
+        // Migrate deprecated 2.0 or non-live text models to an active Live audio model
+        return if (lower.contains("2.0-flash") ||
+            lower == "models/gemini-3.8-flash" ||
+            lower.contains("preview-native-audio-dialog")
+        ) {
+            DEFAULT_LIVE_MODEL
+        } else {
+            if (savedModel.startsWith("models/")) savedModel else "models/$savedModel"
+        }
+    }
+
     fun connect() {
         if (isConnecting || isConnected) return
+        shouldAutoReconnect = true
         isConnecting = true
+        isSessionReady = false
+        handler.removeCallbacks(autoReconnectRunnable)
 
         val prefs = context.getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
         var apiKey = prefs.getString("api_key", "")?.trim() ?: ""
@@ -80,12 +112,12 @@ class GeminiLiveClient(private val context: Context) {
         if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
             Log.e(TAG, "API Key is missing!")
             isConnecting = false
+            shouldAutoReconnect = false
             onError?.invoke("API Key is missing! Set it in Settings.")
             return
         }
 
-        val model = prefs.getString("gemini_model", "models/gemini-2.5-flash-native-audio-preview-12-2025")
-            ?: "models/gemini-2.5-flash-native-audio-preview-12-2025"
+        val model = resolveActiveLiveModel(prefs.getString("gemini_model", DEFAULT_LIVE_MODEL))
         val voice = prefs.getString("gemini_voice", "Aoede") ?: "Aoede"
         val personality = prefs.getString("personality_mode", "GF") ?: "GF"
         val userName = prefs.getString("user_name", "Alex") ?: "Alex"
@@ -97,21 +129,23 @@ class GeminiLiveClient(private val context: Context) {
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.i(TAG, "WebSocket Opened")
+                Log.i(TAG, "WebSocket Opened with model: $model")
                 isConnecting = false
                 isConnected = true
+                isSessionReady = false
 
-                // Send Setup Message
+                // Setup MUST be the first message before any audio/content
                 sendSetupMessage(webSocket, model, voice, systemPrompt)
-
-                handler.post(keepAliveRunnable)
-                handler.postDelayed(sessionRenewalRunnable, SESSION_RENEW_AFTER_MS)
 
                 handler.post { onConnected?.invoke() }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 parseServerMessage(text)
+            }
+
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                parseServerMessage(bytes.utf8())
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -126,7 +160,8 @@ class GeminiLiveClient(private val context: Context) {
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.i(TAG, "WebSocket Closed: $code / $reason")
-                handleDisconnect("Disconnected")
+                val msg = if (reason.isNotBlank()) "Disconnected: $reason" else "Disconnected"
+                handleDisconnect(msg)
             }
         })
     }
@@ -170,7 +205,7 @@ class GeminiLiveClient(private val context: Context) {
     }
 
     fun sendAudioChunk(base64Pcm: String) {
-        if (!isConnected) return
+        if (!isConnected || !isSessionReady) return
         try {
             val chunkJson = JSONObject().apply {
                 put("realtime_input", JSONObject().apply {
@@ -189,7 +224,7 @@ class GeminiLiveClient(private val context: Context) {
     }
 
     fun sendText(text: String) {
-        if (!isConnected) return
+        if (!isConnected || !isSessionReady) return
         try {
             val textJson = JSONObject().apply {
                 put("client_content", JSONObject().apply {
@@ -231,6 +266,23 @@ class GeminiLiveClient(private val context: Context) {
         try {
             val json = JSONObject(text)
 
+            if (json.has("error")) {
+                val errObj = json.optJSONObject("error")
+                val errMsg = errObj?.optString("message", text) ?: text
+                Log.e(TAG, "Server error: $errMsg")
+                handler.post { onError?.invoke(errMsg) }
+                return
+            }
+
+            if (json.has("setupComplete")) {
+                Log.i(TAG, "Setup complete received from Gemini Live")
+                isSessionReady = true
+                handler.postDelayed(keepAliveRunnable, KEEPALIVE_INTERVAL_MS)
+                handler.postDelayed(sessionRenewalRunnable, SESSION_RENEW_AFTER_MS)
+                handler.post { onSetupComplete?.invoke() }
+                return
+            }
+
             // Audio output chunks
             if (json.has("serverContent")) {
                 val serverContent = json.getJSONObject("serverContent")
@@ -247,6 +299,11 @@ class GeminiLiveClient(private val context: Context) {
                                     val base64Data = inlineData.getString("data")
                                     val pcmBytes = Base64.decode(base64Data, Base64.NO_WRAP)
                                     handler.post { onAudioReceived?.invoke(pcmBytes) }
+                                }
+                            } else if (part.has("text")) {
+                                val partText = part.optString("text", "")
+                                if (partText.isNotEmpty()) {
+                                    handler.post { onOutputTranscript?.invoke(partText) }
                                 }
                             }
                         }
@@ -281,6 +338,7 @@ class GeminiLiveClient(private val context: Context) {
     private fun handleDisconnect(reason: String) {
         isConnected = false
         isConnecting = false
+        isSessionReady = false
         handler.removeCallbacks(keepAliveRunnable)
         handler.removeCallbacks(sessionRenewalRunnable)
 
@@ -289,23 +347,26 @@ class GeminiLiveClient(private val context: Context) {
             onError?.invoke(reason)
         }
 
-        // Auto reconnect loop
-        handler.postDelayed({
-            Log.i(TAG, "Attempting auto-reconnect...")
-            connect()
-        }, RECONNECT_DELAY_MS)
+        if (shouldAutoReconnect) {
+            handler.removeCallbacks(autoReconnectRunnable)
+            handler.postDelayed(autoReconnectRunnable, RECONNECT_DELAY_MS)
+        }
     }
 
     fun reconnect() {
         disconnect()
+        shouldAutoReconnect = true
         handler.postDelayed({ connect() }, 500)
     }
 
     fun disconnect() {
+        shouldAutoReconnect = false
         isConnected = false
         isConnecting = false
+        isSessionReady = false
         handler.removeCallbacks(keepAliveRunnable)
         handler.removeCallbacks(sessionRenewalRunnable)
+        handler.removeCallbacks(autoReconnectRunnable)
         try {
             webSocket?.close(1000, "Client closed")
             webSocket = null

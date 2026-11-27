@@ -31,11 +31,13 @@ class SettingsActivity : AppCompatActivity() {
     private val primeContacts = mutableListOf<Pair<String, String>>()
     private lateinit var primeAdapter: PrimeContactAdapter
 
-    private val modelOptions = listOf(
-        "Native Audio (Human Voice) - DEFAULT" to "models/gemini-2.5-flash-native-audio-preview-12-2025",
-        "Flash Live (Fast)" to "models/gemini-2.0-flash-live-001",
-        "Pro Audio Dialog" to "models/gemini-2.5-flash-preview-native-audio-dialog"
+    private val defaultLiveModels = listOf(
+        "Gemini 2.5 Flash Native Audio (Default)" to "models/gemini-2.5-flash-native-audio-preview-12-2025",
+        "Gemini 2.5 Flash Native Audio (09-2025)" to "models/gemini-2.5-flash-native-audio-preview-09-2025",
+        "Gemini 2.5 Flash Live" to "models/gemini-2.5-flash-live-preview"
     )
+    private val modelOptions = defaultLiveModels.toMutableList()
+    private lateinit var modelAdapter: ArrayAdapter<String>
 
     private val voiceOptions = listOf(
         "Aoede (Female)" to "Aoede",
@@ -57,6 +59,7 @@ class SettingsActivity : AppCompatActivity() {
         setupPrimeContactsRecycler()
         loadSavedSettings()
         checkAccessibilityStatus()
+        refreshActiveLiveModelsSilently()
 
         binding.backBtn.setOnClickListener { finish() }
 
@@ -78,22 +81,213 @@ class SettingsActivity : AppCompatActivity() {
         }
     }
 
-    private fun testGeminiApiKey() {
+    private fun getEffectiveApiKey(): String {
         var apiKey = binding.apiKeyInput.text.toString().trim()
         if (apiKey.isEmpty()) {
             apiKey = BuildConfig.GEMINI_API_KEY
         }
-        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
+        return if (apiKey == "MY_GEMINI_API_KEY") "" else apiKey
+    }
+
+    private fun refreshActiveLiveModelsSilently() {
+        val apiKey = getEffectiveApiKey()
+        if (apiKey.isEmpty()) return
+
+        val client = okhttp3.OkHttpClient.Builder()
+            .connectTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .readTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
+            .build()
+
+        val request = okhttp3.Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
+            .get()
+            .build()
+
+        client.newCall(request).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {}
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val bodyStr = response.body?.string() ?: return
+                if (!response.isSuccessful) return
+                val discoveredLive = parseModelsFromResponse(bodyStr).second
+                if (discoveredLive.isNotEmpty()) {
+                    runOnUiThread {
+                        updateLiveModelSpinner(discoveredLive)
+                    }
+                }
+            }
+        })
+    }
+
+    private fun updateLiveModelSpinner(discoveredLive: List<Pair<String, String>>) {
+        val currentSelected = modelOptions.getOrNull(binding.modelSpinner.selectedItemPosition)?.second
+        val merged = mutableListOf<Pair<String, String>>()
+        val seenIds = mutableSetOf<String>()
+
+        for (item in discoveredLive) {
+            if (seenIds.add(item.second)) {
+                merged.add(item)
+            }
+        }
+        for (item in defaultLiveModels) {
+            if (seenIds.add(item.second)) {
+                merged.add(item)
+            }
+        }
+
+        modelOptions.clear()
+        modelOptions.addAll(merged)
+        modelAdapter.clear()
+        modelAdapter.addAll(modelOptions.map { it.first })
+        modelAdapter.notifyDataSetChanged()
+
+        val targetIdx = modelOptions.indexOfFirst { it.second == currentSelected }.coerceAtLeast(0)
+        binding.modelSpinner.setSelection(targetIdx)
+    }
+
+    private fun parseModelsFromResponse(jsonStr: String): Pair<List<String>, List<Pair<String, String>>> {
+        val chatModels = mutableListOf<String>()
+        val liveModels = mutableListOf<Pair<String, String>>()
+        try {
+            val root = JSONObject(jsonStr)
+            val arr = root.optJSONArray("models") ?: return Pair(chatModels, liveModels)
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val fullName = obj.optString("name", "") // e.g. "models/gemini-3.8-flash"
+                val displayName = obj.optString("displayName", fullName.removePrefix("models/"))
+                val methods = obj.optJSONArray("supportedGenerationMethods") ?: continue
+
+                var supportsGenerate = false
+                var supportsBidi = false
+                for (m in 0 until methods.length()) {
+                    when (methods.optString(m)) {
+                        "generateContent" -> supportsGenerate = true
+                        "bidiGenerateContent" -> supportsBidi = true
+                    }
+                }
+
+                val shortId = fullName.removePrefix("models/")
+                val lowerId = shortId.lowercase()
+
+                if (supportsBidi && lowerId.contains("gemini")) {
+                    liveModels.add("$displayName (Active Live)" to fullName)
+                }
+
+                if (supportsGenerate &&
+                    lowerId.startsWith("gemini-") &&
+                    !lowerId.contains("embedding") &&
+                    !lowerId.contains("tts") &&
+                    !lowerId.contains("image") &&
+                    !lowerId.contains("robotics") &&
+                    !lowerId.contains("computer-use") &&
+                    !lowerId.contains("customtools")
+                ) {
+                    chatModels.add(shortId)
+                }
+            }
+        } catch (_: Exception) {}
+
+        // Prioritize stable & newer flash/flash-lite models first
+        val sortedChat = chatModels.sortedWith(
+            compareByDescending<String> { it.contains("flash") && !it.contains("exp") }
+                .thenByDescending { it.contains("flash-lite") || it.contains("flash") }
+                .thenByDescending { it }
+        )
+
+        return Pair(sortedChat, liveModels)
+    }
+
+    private fun testGeminiApiKey() {
+        val apiKey = getEffectiveApiKey()
+        if (apiKey.isEmpty()) {
             Toast.makeText(this, "Please enter a valid Gemini API Key first!", Toast.LENGTH_SHORT).show()
             return
         }
 
-        Toast.makeText(this, "Testing Gemini API...", Toast.LENGTH_SHORT).show()
+        binding.testApiKeyBtn.isEnabled = false
+        binding.testApiKeyBtn.text = "CHECKING ACTIVE MODELS..."
 
         val client = okhttp3.OkHttpClient.Builder()
             .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .readTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
             .build()
+
+        // Step 1: Discover all currently active models directly from Gemini API
+        val listRequest = okhttp3.Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
+            .get()
+            .build()
+
+        client.newCall(listRequest).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                runOnUiThread {
+                    binding.testApiKeyBtn.isEnabled = true
+                    binding.testApiKeyBtn.text = "TEST GEMINI API"
+                    Toast.makeText(this@SettingsActivity, "Connection Failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val listResponseStr = response.body?.string() ?: ""
+                if (!response.isSuccessful) {
+                    runOnUiThread {
+                        binding.testApiKeyBtn.isEnabled = true
+                        binding.testApiKeyBtn.text = "TEST GEMINI API"
+                        AlertDialog.Builder(this@SettingsActivity)
+                            .setTitle("Gemini API Key Error ❌")
+                            .setMessage("Error code ${response.code}:\n$listResponseStr")
+                            .setPositiveButton("OK", null)
+                            .show()
+                    }
+                    return
+                }
+
+                val (activeChatModels, activeLiveModels) = parseModelsFromResponse(listResponseStr)
+                if (activeLiveModels.isNotEmpty()) {
+                    runOnUiThread {
+                        updateLiveModelSpinner(activeLiveModels)
+                    }
+                }
+
+                val modelsToTry = if (activeChatModels.isNotEmpty()) {
+                    activeChatModels.take(6)
+                } else {
+                    listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash")
+                }
+
+                runOnUiThread {
+                    binding.testApiKeyBtn.text = "TESTING ${modelsToTry.first()}..."
+                }
+                tryModelAtIndex(client, apiKey, modelsToTry, activeLiveModels.map { it.second.removePrefix("models/") }, 0)
+            }
+        })
+    }
+
+    private fun tryModelAtIndex(
+        client: okhttp3.OkHttpClient,
+        apiKey: String,
+        models: List<String>,
+        activeLiveIds: List<String>,
+        index: Int
+    ) {
+        if (index >= models.size) {
+            runOnUiThread {
+                binding.testApiKeyBtn.isEnabled = true
+                binding.testApiKeyBtn.text = "TEST GEMINI API"
+                val activeListSummary = models.joinToString("\n• ", prefix = "• ")
+                AlertDialog.Builder(this@SettingsActivity)
+                    .setTitle("API Key Valid, Models Busy ⚠️")
+                    .setMessage("Your API key is active! Discovered active models:\n$activeListSummary\n\nAll returned temporary 503/429 load errors right now. Please try again in a moment.")
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+            return
+        }
+
+        val modelId = models[index]
+        runOnUiThread {
+            binding.testApiKeyBtn.text = "TESTING $modelId..."
+        }
 
         val jsonBody = JSONObject().apply {
             put("contents", JSONArray().put(
@@ -106,21 +300,30 @@ class SettingsActivity : AppCompatActivity() {
         val body = jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
 
         val request = okhttp3.Request.Builder()
-            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey")
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent?key=$apiKey")
             .post(body)
             .build()
 
         client.newCall(request).enqueue(object : okhttp3.Callback {
             override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
                 runOnUiThread {
+                    binding.testApiKeyBtn.isEnabled = true
+                    binding.testApiKeyBtn.text = "TEST GEMINI API"
                     Toast.makeText(this@SettingsActivity, "Test Failed: ${e.message}", Toast.LENGTH_LONG).show()
                 }
             }
 
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 val responseStr = response.body?.string() ?: ""
-                runOnUiThread {
-                    if (response.isSuccessful) {
+                val code = response.code
+                if (response.isSuccessful) {
+                    runOnUiThread {
+                        binding.testApiKeyBtn.isEnabled = true
+                        binding.testApiKeyBtn.text = "TEST GEMINI API"
+                        val activeSummary = models.take(4).joinToString(", ")
+                        val liveSummary = if (activeLiveIds.isNotEmpty()) {
+                            "\n\nActive Live Audio Models:\n• " + activeLiveIds.take(4).joinToString("\n• ")
+                        } else ""
                         try {
                             val json = JSONObject(responseStr)
                             val text = json.getJSONArray("candidates")
@@ -130,21 +333,27 @@ class SettingsActivity : AppCompatActivity() {
                                 .getJSONObject(0)
                                 .getString("text")
                             AlertDialog.Builder(this@SettingsActivity)
-                                .setTitle("Gemini API Test Success ✅")
-                                .setMessage("Response from Gemini:\n\n$text")
+                                .setTitle("Gemini API Active ✅")
+                                .setMessage("Tested Model: $modelId\nResponse:\n$text\n\nActive Chat Models:\n$activeSummary$liveSummary")
                                 .setPositiveButton("OK", null)
                                 .show()
                         } catch (e: Exception) {
                             AlertDialog.Builder(this@SettingsActivity)
-                                .setTitle("Gemini API Test Success ✅")
-                                .setMessage("Connected successfully, but parse error: ${e.message}")
+                                .setTitle("Gemini API Active ✅")
+                                .setMessage("Connected via $modelId!\n\nActive Chat Models:\n$activeSummary$liveSummary")
                                 .setPositiveButton("OK", null)
                                 .show()
                         }
-                    } else {
+                    }
+                } else if ((code == 503 || code == 404 || code == 429 || code == 400) && index + 1 < models.size) {
+                    tryModelAtIndex(client, apiKey, models, activeLiveIds, index + 1)
+                } else {
+                    runOnUiThread {
+                        binding.testApiKeyBtn.isEnabled = true
+                        binding.testApiKeyBtn.text = "TEST GEMINI API"
                         AlertDialog.Builder(this@SettingsActivity)
                             .setTitle("Gemini API Test Failed ❌")
-                            .setMessage("Error code ${response.code}:\n$responseStr")
+                            .setMessage("Model: $modelId\nError code $code:\n$responseStr")
                             .setPositiveButton("OK", null)
                             .show()
                     }
@@ -159,10 +368,10 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private fun setupSpinners() {
-        val modelAdapter = ArrayAdapter(
+        modelAdapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_item,
-            modelOptions.map { it.first }
+            modelOptions.map { it.first }.toMutableList()
         ).apply {
             setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         }
@@ -190,7 +399,13 @@ class SettingsActivity : AppCompatActivity() {
     private fun loadSavedSettings() {
         val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
 
-        binding.apiKeyInput.setText(prefs.getString("api_key", ""))
+        val savedKey = prefs.getString("api_key", "")?.trim() ?: ""
+        val effectiveKey = if (savedKey.isEmpty() && BuildConfig.GEMINI_API_KEY.isNotEmpty() && BuildConfig.GEMINI_API_KEY != "MY_GEMINI_API_KEY") {
+            BuildConfig.GEMINI_API_KEY
+        } else {
+            savedKey
+        }
+        binding.apiKeyInput.setText(effectiveKey)
         binding.userNameInput.setText(prefs.getString("user_name", "Alex"))
 
         val savedModel = prefs.getString("gemini_model", "models/gemini-2.5-flash-native-audio-preview-12-2025")

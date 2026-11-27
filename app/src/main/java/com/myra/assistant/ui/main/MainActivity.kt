@@ -16,6 +16,8 @@ import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -23,6 +25,7 @@ import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.LinearLayoutManager
+import com.myra.assistant.BuildConfig
 import com.myra.assistant.R
 import com.myra.assistant.ai.AudioEngine
 import com.myra.assistant.ai.CommandParser
@@ -31,9 +34,16 @@ import com.myra.assistant.databinding.ActivityMainBinding
 import com.myra.assistant.service.CallMonitorService
 import com.myra.assistant.ui.settings.SettingsActivity
 import com.myra.assistant.viewmodel.MainViewModel
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONArray
+import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
@@ -47,16 +57,28 @@ class MainActivity : AppCompatActivity() {
     private var geminiLive: GeminiLiveClient? = null
     private var audioEngine: AudioEngine? = null
     private var speechRecognizer: SpeechRecognizer? = null
+    private var textToSpeech: TextToSpeech? = null
+    private var isTtsReady = false
+    private var pendingTtsText: String? = null
 
     private val chatAdapter = ChatAdapter()
 
     private val inputBuffer = StringBuilder()
     private val outputBuffer = StringBuilder()
 
-    private var isMuted = false
+    private var isAiRunning = false
+    private var isMuted = true
     private var isInCallMode = false
+    private var pendingStartAfterPermission = false
+    private var hasReceivedLiveAudioInTurn = false
+    private var hasTriggeredGreetingFallback = false
+    private var lastConfigSignature: String? = null
 
     private val handler = Handler(Looper.getMainLooper())
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .build()
 
     private val statusUpdateRunnable = object : Runnable {
         override fun run() {
@@ -79,8 +101,12 @@ class MainActivity : AppCompatActivity() {
         val recordAudioGranted = permissions[Manifest.permission.RECORD_AUDIO] == true
         if (recordAudioGranted) {
             startSystemServices()
-            initGeminiLive()
+            if (pendingStartAfterPermission) {
+                pendingStartAfterPermission = false
+                startAiAssistant()
+            }
         } else {
+            pendingStartAfterPermission = false
             Toast.makeText(this, "Microphone permission is required for MYRA", Toast.LENGTH_LONG).show()
         }
     }
@@ -98,8 +124,9 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        initTts()
         setupUI()
-        checkAndRequestPermissions()
+        checkAndRequestPermissions(autoStart = false)
         startStatusUpdates()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -118,6 +145,64 @@ class MainActivity : AppCompatActivity() {
         handleIncomingCallIntent(intent)
     }
 
+    private fun initTts() {
+        textToSpeech = TextToSpeech(this) { status ->
+            if (status == TextToSpeech.SUCCESS) {
+                val tts = textToSpeech
+                if (tts != null) {
+                    val candidates = listOf(Locale("en", "IN"), Locale.US, Locale.ENGLISH, Locale.getDefault())
+                    for (loc in candidates) {
+                        val res = tts.isLanguageAvailable(loc)
+                        if (res >= TextToSpeech.LANG_AVAILABLE) {
+                            tts.language = loc
+                            break
+                        }
+                    }
+                    tts.setAudioAttributes(
+                        android.media.AudioAttributes.Builder()
+                            .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                            .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH)
+                            .build()
+                    )
+                }
+                isTtsReady = true
+                textToSpeech?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {
+                        runOnUiThread {
+                            binding.orbView.setState(OrbAnimationView.State.SPEAKING)
+                            binding.statusText.text = "Bol rahi hoon... 🔊"
+                            binding.waveformView.setAmplitude(0.75f)
+                            animateRedOverlay(true)
+                        }
+                    }
+
+                    override fun onDone(utteranceId: String?) {
+                        runOnUiThread {
+                            if (isAiRunning) {
+                                binding.orbView.setState(OrbAnimationView.State.LISTENING)
+                                binding.statusText.text = if (isMuted) "Microphone Muted 🔇" else "Sun rahi hoon... 🎙️"
+                            } else {
+                                binding.orbView.setState(OrbAnimationView.State.IDLE)
+                                binding.statusText.text = "Tap START to talk ✨"
+                            }
+                            binding.waveformView.setAmplitude(0.1f)
+                            animateRedOverlay(false)
+                        }
+                    }
+
+                    @Deprecated("Deprecated in Java")
+                    override fun onError(utteranceId: String?) {
+                        onDone(utteranceId)
+                    }
+                })
+                pendingTtsText?.let { pending ->
+                    pendingTtsText = null
+                    speakWithTts(pending)
+                }
+            }
+        }
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
@@ -134,17 +219,55 @@ class MainActivity : AppCompatActivity() {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
 
+        binding.startStopBtn.setOnClickListener {
+            if (isAiRunning) {
+                stopAiAssistant()
+            } else {
+                startAiAssistant()
+            }
+        }
+
+        binding.orbView.setOnClickListener {
+            if (!isAiRunning) {
+                startAiAssistant()
+            }
+        }
+
         binding.micButton.setOnClickListener {
-            toggleMute()
+            if (!isAiRunning) {
+                startAiAssistant()
+            } else {
+                toggleMute()
+            }
         }
 
         binding.micButton.setOnLongClickListener {
             interruptMyra()
             true
         }
+
+        updateControlButtons()
     }
 
-    private fun checkAndRequestPermissions() {
+    private fun updateControlButtons() {
+        if (isAiRunning) {
+            binding.startStopBtn.text = "STOP"
+            binding.startStopBtn.setIconResource(android.R.drawable.ic_media_pause)
+            binding.startStopBtn.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                android.graphics.Color.parseColor("#880E4F")
+            )
+            binding.micButton.setImageResource(if (isMuted) R.drawable.ic_mic_off else R.drawable.ic_mic_on)
+        } else {
+            binding.startStopBtn.text = "START"
+            binding.startStopBtn.setIconResource(android.R.drawable.ic_media_play)
+            binding.startStopBtn.backgroundTintList = android.content.res.ColorStateList.valueOf(
+                android.graphics.Color.parseColor("#FF1744")
+            )
+            binding.micButton.setImageResource(R.drawable.ic_mic_off)
+        }
+    }
+
+    private fun checkAndRequestPermissions(autoStart: Boolean) {
         val neededPermissions = mutableListOf(
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_CONTACTS,
@@ -167,10 +290,13 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (missing.isNotEmpty()) {
+            pendingStartAfterPermission = autoStart
             requestPermissionsLauncher.launch(missing.toTypedArray())
         } else {
             startSystemServices()
-            handler.postDelayed({ initGeminiLive() }, 300)
+            if (autoStart) {
+                startAiAssistant()
+            }
         }
     }
 
@@ -187,89 +313,193 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun currentConfigSignature(): String {
+        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+        return listOf(
+            prefs.getString("api_key", "") ?: "",
+            prefs.getString("gemini_model", "") ?: "",
+            prefs.getString("gemini_voice", "") ?: "",
+            prefs.getString("personality_mode", "") ?: "",
+            prefs.getString("user_name", "") ?: ""
+        ).joinToString("|")
+    }
+
+    private val greetingFallbackRunnable = Runnable {
+        if (isAiRunning && !hasReceivedLiveAudioInTurn) {
+            Log.i(TAG, "Live audio did not arrive in time; triggering active REST + voice fallback greeting")
+            speakActiveGeminiGreeting()
+        }
+    }
+
+    private fun startAiAssistant() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            checkAndRequestPermissions(autoStart = true)
+            return
+        }
+
+        isAiRunning = true
+        isMuted = false
+        hasReceivedLiveAudioInTurn = false
+        hasTriggeredGreetingFallback = false
+        updateControlButtons()
+
+        binding.orbView.setState(OrbAnimationView.State.THINKING)
+        binding.statusText.text = "Starting MYRA... ✨"
+
+        initGeminiLive()
+        audioEngine?.isMuted = false
+        audioEngine?.startPlayback()
+        audioEngine?.startRecording()
+
+        if (geminiLive?.isConnected == true) {
+            sendGreeting()
+        } else {
+            geminiLive?.connect()
+        }
+
+        handler.removeCallbacks(greetingFallbackRunnable)
+        handler.postDelayed(greetingFallbackRunnable, 4500L)
+    }
+
+    private fun stopAiAssistant() {
+        isAiRunning = false
+        isMuted = true
+        handler.removeCallbacks(greetingFallbackRunnable)
+        textToSpeech?.stop()
+        geminiLive?.disconnect()
+        audioEngine?.isMuted = true
+        audioEngine?.stopRecording()
+        audioEngine?.clearPlaybackQueue()
+
+        binding.orbView.setState(OrbAnimationView.State.IDLE)
+        binding.waveformView.setAmplitude(0.05f)
+        animateRedOverlay(false)
+        binding.statusText.text = "Tap START to talk ✨"
+        updateControlButtons()
+    }
+
     private fun initGeminiLive() {
-        if (geminiLive != null) return
+        lastConfigSignature = currentConfigSignature()
 
-        geminiLive = GeminiLiveClient(this).apply {
-            onConnected = {
-                Log.i(TAG, "Gemini Live Connected")
-                audioEngine?.startRecording()
-                audioEngine?.startPlayback()
-                binding.orbView.setState(OrbAnimationView.State.LISTENING)
-                binding.statusText.text = "Sun rahi hoon... 🎙️"
-
-                handler.postDelayed({ sendGreeting() }, 600)
-            }
-
-            onDisconnected = {
-                binding.orbView.setState(OrbAnimationView.State.IDLE)
-                binding.statusText.text = "Disconnected. Reconnecting..."
-            }
-
-            onError = { err ->
-                Log.e(TAG, "Gemini Error: $err")
-                binding.statusText.text = err
-            }
-
-            onAudioReceived = { pcmBytes ->
-                audioEngine?.queueAudio(pcmBytes)
-            }
-
-            onOutputTranscript = { text ->
-                outputBuffer.append(text)
-            }
-
-            onInputTranscript = { text ->
-                inputBuffer.append(text)
-            }
-
-            onTurnComplete = {
-                val userText = inputBuffer.toString().trim()
-                val myraText = outputBuffer.toString().trim()
-
-                if (userText.isNotEmpty()) {
-                    addUserMessage(userText)
-                    val cmd = CommandParser.parse(userText)
-                    if (cmd != null) {
-                        viewModel.executeCommand(cmd)
+        if (geminiLive == null) {
+            geminiLive = GeminiLiveClient(this).apply {
+                onConnected = {
+                    Log.i(TAG, "Gemini Live WebSocket Connected")
+                    if (isAiRunning) {
+                        audioEngine?.startRecording()
+                        audioEngine?.startPlayback()
+                        binding.orbView.setState(OrbAnimationView.State.THINKING)
+                        binding.statusText.text = "Connected, waking MYRA... ✨"
                     }
                 }
 
-                if (myraText.isNotEmpty()) {
-                    addMyraMessage(myraText)
+                onSetupComplete = {
+                    Log.i(TAG, "Gemini Live Setup Complete")
+                    if (isAiRunning) {
+                        binding.orbView.setState(OrbAnimationView.State.LISTENING)
+                        binding.statusText.text = "MYRA active — bol rahi hoon... 🔊"
+                        sendGreeting()
+                    }
                 }
 
-                inputBuffer.clear()
-                outputBuffer.clear()
+                onDisconnected = {
+                    if (isAiRunning) {
+                        binding.orbView.setState(OrbAnimationView.State.THINKING)
+                        binding.statusText.text = "Reconnecting..."
+                    } else {
+                        binding.orbView.setState(OrbAnimationView.State.IDLE)
+                        binding.statusText.text = "Tap START to talk ✨"
+                    }
+                }
+
+                onError = { err ->
+                    Log.e(TAG, "Gemini Error: $err")
+                    if (isAiRunning) {
+                        binding.statusText.text = err
+                        if (!hasReceivedLiveAudioInTurn) {
+                            handler.removeCallbacks(greetingFallbackRunnable)
+                            speakActiveGeminiGreeting()
+                        }
+                    }
+                }
+
+                onAudioReceived = { pcmBytes ->
+                    hasReceivedLiveAudioInTurn = true
+                    handler.removeCallbacks(greetingFallbackRunnable)
+                    audioEngine?.queueAudio(pcmBytes)
+                }
+
+                onOutputTranscript = { text ->
+                    outputBuffer.append(text)
+                }
+
+                onInputTranscript = { text ->
+                    inputBuffer.append(text)
+                }
+
+                onTurnComplete = {
+                    val userText = inputBuffer.toString().trim()
+                    val myraText = outputBuffer.toString().trim()
+
+                    if (userText.isNotEmpty()) {
+                        addUserMessage(userText)
+                        val cmd = CommandParser.parse(userText)
+                        if (cmd != null) {
+                            viewModel.executeCommand(cmd)
+                        }
+                    }
+
+                    if (myraText.isNotEmpty()) {
+                        addMyraMessage(myraText)
+                        if (!hasReceivedLiveAudioInTurn) {
+                            speakWithTts(myraText)
+                        }
+                    }
+
+                    hasReceivedLiveAudioInTurn = false
+                    inputBuffer.clear()
+                    outputBuffer.clear()
+                }
             }
         }
 
-        audioEngine = AudioEngine(this).apply {
-            onAudioChunkRecorded = { base64 ->
-                if (!isInCallMode) {
-                    geminiLive?.sendAudioChunk(base64)
+        if (audioEngine == null) {
+            audioEngine = AudioEngine(this).apply {
+                onAudioChunkRecorded = { base64 ->
+                    if (isAiRunning && !isInCallMode) {
+                        geminiLive?.sendAudioChunk(base64)
+                    }
+                }
+
+                onAmplitudeChanged = { rms ->
+                    runOnUiThread {
+                        binding.waveformView.setAmplitude(rms)
+                        binding.orbView.amplitude = rms
+                    }
+                }
+
+                onSpeakingStarted = {
+                    runOnUiThread {
+                        binding.orbView.setState(OrbAnimationView.State.SPEAKING)
+                        binding.statusText.text = "Bol rahi hoon... 🔊"
+                        animateRedOverlay(true)
+                    }
+                }
+
+                onSpeakingStopped = {
+                    runOnUiThread {
+                        if (isAiRunning) {
+                            binding.orbView.setState(OrbAnimationView.State.LISTENING)
+                            binding.statusText.text = if (isMuted) "Microphone Muted 🔇" else "Sun rahi hoon... 🎙️"
+                        } else {
+                            binding.orbView.setState(OrbAnimationView.State.IDLE)
+                            binding.statusText.text = "Tap START to talk ✨"
+                        }
+                        animateRedOverlay(false)
+                    }
                 }
             }
-
-            onAmplitudeChanged = { rms ->
-                binding.waveformView.setAmplitude(rms)
-                binding.orbView.amplitude = rms
-            }
-
-            onSpeakingStarted = {
-                binding.orbView.setState(OrbAnimationView.State.SPEAKING)
-                binding.statusText.text = "Bol rahi hoon... 🔊"
-                animateRedOverlay(true)
-            }
-
-            onSpeakingStopped = {
-                binding.orbView.setState(OrbAnimationView.State.LISTENING)
-                binding.statusText.text = "Sun rahi hoon... 🎙️"
-                animateRedOverlay(false)
-            }
         }
-
-        geminiLive?.connect()
     }
 
     private fun sendGreeting() {
@@ -277,13 +507,155 @@ class MainActivity : AppCompatActivity() {
         val name = prefs.getString("user_name", "Alex") ?: "Alex"
         val personality = prefs.getString("personality_mode", "GF")
 
-        val greeting = when (personality) {
-            "Professional" -> "Good day $name. MYRA is online and ready to assist you."
-            "Assistant" -> "Hello $name! Main MYRA hoon. Kaise help karun aapki?"
-            else -> "Hey $name! Main aa gayi hoon. Kya help chahiye tumhe?"
+        val prompt = when (personality) {
+            "Professional" -> "Greet $name professionally in 1 short sentence right now and ask how you can help."
+            "Assistant" -> "Greet $name warmly in Hinglish in 1 short sentence right now and ask how you can help."
+            else -> "Greet $name warmly and affectionately in Hinglish in 1-2 short sentences right now, letting them know MYRA is active and listening."
         }
 
-        geminiLive?.sendText(greeting)
+        geminiLive?.sendText(prompt)
+    }
+
+    private fun speakActiveGeminiGreeting() {
+        if (hasTriggeredGreetingFallback || hasReceivedLiveAudioInTurn || !isAiRunning) return
+        hasTriggeredGreetingFallback = true
+        val prefs = getSharedPreferences("myra_prefs", Context.MODE_PRIVATE)
+        var apiKey = prefs.getString("api_key", "")?.trim() ?: ""
+        if (apiKey.isEmpty()) apiKey = BuildConfig.GEMINI_API_KEY
+        val name = prefs.getString("user_name", "Alex") ?: "Alex"
+        val personality = prefs.getString("personality_mode", "GF")
+
+        val fallbackLocalGreeting = when (personality) {
+            "Professional" -> "Hello $name. MYRA is online and ready to assist you."
+            "Assistant" -> "Hello $name! Main MYRA hoon, bataiye main aapki kya help kar sakti hoon?"
+            else -> "Hey $name! Main MYRA hoon, ab main active hoon. Bolo kya baat hai?"
+        }
+
+        if (apiKey.isEmpty() || apiKey == "MY_GEMINI_API_KEY") {
+            addMyraMessage(fallbackLocalGreeting)
+            speakWithTts(fallbackLocalGreeting)
+            return
+        }
+
+        val prompt = when (personality) {
+            "Professional" -> "You are MYRA. Greet $name professionally in one short spoken sentence."
+            "Assistant" -> "You are MYRA. Greet $name friendly in Hinglish in one short spoken sentence."
+            else -> "You are MYRA, a caring Hinglish AI companion. Greet $name warmly in 1 short spoken sentence."
+        }
+
+        // Discover active generateContent model and fetch a live greeting
+        val listReq = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models?key=$apiKey")
+            .get()
+            .build()
+
+        httpClient.newCall(listReq).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                runOnUiThread {
+                    if (isAiRunning && !hasReceivedLiveAudioInTurn) {
+                        addMyraMessage(fallbackLocalGreeting)
+                        speakWithTts(fallbackLocalGreeting)
+                    }
+                }
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val listJson = response.body?.string() ?: ""
+                val activeModels = mutableListOf<String>()
+                try {
+                    val arr = JSONObject(listJson).optJSONArray("models")
+                    if (arr != null) {
+                        for (i in 0 until arr.length()) {
+                            val obj = arr.optJSONObject(i) ?: continue
+                            val id = obj.optString("name", "").removePrefix("models/")
+                            val methods = obj.optJSONArray("supportedGenerationMethods") ?: continue
+                            var supportsGen = false
+                            for (m in 0 until methods.length()) {
+                                if (methods.optString(m) == "generateContent") supportsGen = true
+                            }
+                            if (supportsGen && id.startsWith("gemini-") && id.contains("flash") &&
+                                !id.contains("tts") && !id.contains("image") && !id.contains("exp")
+                            ) {
+                                activeModels.add(id)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+
+                val modelsToTry = if (activeModels.isNotEmpty()) activeModels.take(4)
+                else listOf("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash")
+
+                tryFallbackGenerate(apiKey, prompt, modelsToTry, 0, fallbackLocalGreeting)
+            }
+        })
+    }
+
+    private fun tryFallbackGenerate(
+        apiKey: String,
+        prompt: String,
+        models: List<String>,
+        index: Int,
+        fallbackLocalGreeting: String
+    ) {
+        if (!isAiRunning || hasReceivedLiveAudioInTurn) return
+        if (index >= models.size) {
+            runOnUiThread {
+                addMyraMessage(fallbackLocalGreeting)
+                speakWithTts(fallbackLocalGreeting)
+            }
+            return
+        }
+
+        val modelId = models[index]
+        val jsonBody = JSONObject().apply {
+            put("contents", JSONArray().put(
+                JSONObject().put("parts", JSONArray().put(JSONObject().put("text", prompt)))
+            ))
+        }
+        val req = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent?key=$apiKey")
+            .post(jsonBody.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
+            .build()
+
+        httpClient.newCall(req).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                tryFallbackGenerate(apiKey, prompt, models, index + 1, fallbackLocalGreeting)
+            }
+
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                val str = response.body?.string() ?: ""
+                if (response.isSuccessful) {
+                    try {
+                        val reply = JSONObject(str)
+                            .getJSONArray("candidates")
+                            .getJSONObject(0)
+                            .getJSONObject("content")
+                            .getJSONArray("parts")
+                            .getJSONObject(0)
+                            .getString("text")
+                            .trim()
+                        runOnUiThread {
+                            if (isAiRunning && !hasReceivedLiveAudioInTurn) {
+                                addMyraMessage(reply)
+                                speakWithTts(reply)
+                            }
+                        }
+                        return
+                    } catch (_: Exception) {}
+                }
+                tryFallbackGenerate(apiKey, prompt, models, index + 1, fallbackLocalGreeting)
+            }
+        })
+    }
+
+    private fun speakWithTts(text: String) {
+        if (!isTtsReady) {
+            pendingTtsText = text
+            return
+        }
+        val params = Bundle()
+        params.putInt(TextToSpeech.Engine.KEY_PARAM_STREAM, android.media.AudioManager.STREAM_MUSIC)
+        textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, params, "myra_utterance_${System.currentTimeMillis()}")
     }
 
     private fun handleIncomingCallIntent(intent: Intent?) {
@@ -353,10 +725,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun interruptMyra() {
+        textToSpeech?.stop()
         audioEngine?.clearPlaybackQueue()
         geminiLive?.sendInterrupt()
-        binding.orbView.setState(OrbAnimationView.State.LISTENING)
-        binding.statusText.text = "Stopped. Sun rahi hoon... 🎙️"
+        if (isAiRunning) {
+            binding.orbView.setState(OrbAnimationView.State.LISTENING)
+            binding.statusText.text = "Stopped. Sun rahi hoon... 🎙️"
+        }
         Toast.makeText(this, "MYRA stopped speaking", Toast.LENGTH_SHORT).show()
     }
 
@@ -408,19 +783,29 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (!isMuted) {
+        if (isAiRunning && !isMuted) {
             audioEngine?.isMuted = false
         }
         updateSystemStatus()
+
+        val currentSig = currentConfigSignature()
+        if (isAiRunning && geminiLive != null && lastConfigSignature != null && currentSig != lastConfigSignature) {
+            lastConfigSignature = currentSig
+            binding.statusText.text = "Reconnecting with updated settings..."
+            geminiLive?.reconnect()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(statusUpdateRunnable)
+        handler.removeCallbacks(greetingFallbackRunnable)
         try {
             unregisterReceiver(callEndedReceiver)
         } catch (_: Exception) {}
 
+        textToSpeech?.stop()
+        textToSpeech?.shutdown()
         speechRecognizer?.destroy()
         geminiLive?.disconnect()
         audioEngine?.release()

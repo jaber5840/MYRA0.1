@@ -57,7 +57,7 @@ class AudioEngine(private val context: Context) {
             val bufferSize = Math.max(minBufferSize, SPEAKER_SAMPLE_RATE * 2)
 
             val attributes = AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
+                .setUsage(AudioAttributes.USAGE_MEDIA)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                 .build()
 
